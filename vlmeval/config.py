@@ -439,7 +439,7 @@ api_models = {
     # lmdeploy api
     "lmdeploy": partial(
         LMDeployAPI,
-        api_base="http://0.0.0.0:23333/v1/chat/completions",
+        api_base="http://0.0.0.0:18902/v1/chat/completions",
         temperature=0,
         retry=10,
     ),
