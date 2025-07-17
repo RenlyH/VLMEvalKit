@@ -256,13 +256,13 @@ class LMDeployWrapper(BaseAPI):
                 if msg['type'] == 'text':
                     content_list.append(dict(type='text', text=msg['value']))
                 elif msg['type'] == 'image':
-                    from PIL import Image
-                    img = Image.open(msg['value'])
-                    b64 = encode_image_to_base64(img)
+                    # Use Qwen's custom image preprocessing
+                    from ..vlm.qwen2_vl.model import encode_image
+                    b64, mime_type = encode_image(msg['value'])
                     extra_args = msg.copy()
                     extra_args.pop('type')
                     extra_args.pop('value')
-                    img_struct = dict(url=f'data:image/jpeg;base64,{b64}', **extra_args)
+                    img_struct = dict(url=f'data:{mime_type};base64,{b64}', **extra_args)
                     content_list.append(dict(type='image_url', image_url=img_struct))
         else:
             assert all([x['type'] == 'text' for x in inputs])
