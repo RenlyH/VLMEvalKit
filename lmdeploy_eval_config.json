@@ -1,0 +1,17 @@
+{
+  "model": {
+    "vllm-Qwen2.5-VL-7B-Instruct": {
+      "class": "LMDeployAPI",
+      "api_base": "http://0.0.0.0:18902/v1/chat/completions",
+      "temperature": 0,
+      "retry": 10,
+      "system_prompt": "This is a [PLACEHOLDER] for SYSTEM_PROMPT"
+    }
+  },
+  "data": {
+    "VStarBench": {
+      "class": "ImageMCQDataset",
+      "dataset": "VStarBench"
+    }
+  }
+}
