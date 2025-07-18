@@ -4,14 +4,21 @@
       "class": "LMDeployAPI",
       "api_base": "http://0.0.0.0:18902/v1/chat/completions",
       "temperature": 0,
-      "retry": 10,
-      "system_prompt": "This is a [PLACEHOLDER] for SYSTEM_PROMPT"
+      "retry": 10
     }
   },
   "data": {
-    "VStarBench": {
-      "class": "ImageMCQDataset",
-      "dataset": "VStarBench"
+    "MMMU_DEV_VAL":{
+      "class": "MMMUDataset",
+      "dataset": "MMMU_DEV_VAL"
+    },
+    "MathVista_MINI": {
+      "class": "MathVista",
+      "dataset": "MathVista_MINI"
+    },
+    "VLMBlind":{
+      "class": "VLMBlind",
+      "dataset": "VLMBlind"
     }
   }
 }
