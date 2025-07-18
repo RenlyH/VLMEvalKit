@@ -4,6 +4,17 @@ import requests
 from ..dataset import DATASET_TYPE, DATASET_MODALITY
 from vlmeval.api.base import BaseAPI
 from vlmeval.smp import *
+from ..utils import PythonInterpreter
+from ..utils.python_tool import extract_tool_call_contents
+import base64
+from io import BytesIO
+
+def encode_pil_image_to_base64(image):
+    """Convert PIL Image to base64 string"""
+    buffer = BytesIO()
+    image.save(buffer, format='JPEG')
+    img_str = base64.b64encode(buffer.getvalue()).decode()
+    return img_str
 
 
 class InternVL2_PromptUtil:
@@ -179,6 +190,7 @@ class LMDeployWrapper(BaseAPI):
                  api_base: str = None,
                  system_prompt: str = None,
                  max_tokens: int = 1024,
+                 use_tool: bool = False,
                  **kwargs):
         self.fail_msg = 'Failed to obtain answer via API. '
         self.max_tokens = max_tokens
@@ -329,4 +341,144 @@ class LMDeployAPI(LMDeployWrapper):
         super().__init__(**kwargs)
 
     def generate(self, message, dataset=None):
-        return super(LMDeployAPI, self).generate(message, dataset=dataset)
+        return super(LMDeployAPI, self).generate(message, dataset=dataset)\
+
+class LMDeployAPIWithToolUse(LMDeployAPI):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.use_tool = kwargs.get('use_tool', False)
+        self.tool_start_token = kwargs.get('tool_start_token', None)
+        self.tool_end_token = kwargs.get('tool_end_token', None)
+        if self.use_tool:
+            assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
+            # Initialize Python interpreter for tool use
+            self.interpreter = PythonInterpreter("python", "Python code execution", {})
+
+    def generate(self, **kwargs):
+        return super().generate(**kwargs)
+
+    def setup_interpreter_with_images(self, inputs):
+        """Setup interpreter with input images"""
+        if not self.use_tool:
+            return
+
+        # Create fresh interpreter instance for each generation call
+        self.interpreter = PythonInterpreter("python", "Python code execution", {})
+
+        # Extract PIL Images from inputs (similar to prepare_itlist)
+        from PIL import Image
+        images = []
+        for msg in inputs:
+            if msg['type'] == 'image':
+                # msg['value'] is the image path
+                img = Image.open(msg['value'])
+                images.append(img)
+
+        if images:
+            # Reset interpreter with PIL Images
+            multi_modal_data = {'image': images}
+            self.interpreter.reset("", multi_modal_data, multi_modal_data)
+
+    def generate_inner(self, inputs, **kwargs) -> str:
+
+        if not self.use_tool:
+            return super().generate_inner(inputs, **kwargs)
+
+        # Setup interpreter with input images
+        self.setup_interpreter_with_images(inputs)
+
+        input_msgs = self.prepare_inputs(inputs)
+
+        temperature = kwargs.pop('temperature', self.temperature)
+        self.logger.info(f'Generate temperature: {temperature}')
+        max_tokens = kwargs.pop('max_tokens', self.max_tokens)
+        dataset = kwargs.pop('dataset', None)
+
+        headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {self.key}'}
+
+        response_message = ""
+        try_count = 0
+
+        try:
+            while try_count < 10:  # Limit number of rounds
+                # Prepare payload with tool stop token
+                payload = dict(
+                    model=self.model,
+                    messages=input_msgs,
+                    max_tokens=max_tokens,
+                    n=1,
+                    temperature=temperature,
+                    stop=[self.tool_end_token],
+                    include_stop_str_in_output=True,
+                    **kwargs)
+
+                response = requests.post(
+                    self.api_base,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=self.timeout * 1.1)
+
+                ret_code = response.status_code
+                ret_code = 0 if (200 <= int(ret_code) < 300) else ret_code
+
+                if ret_code != 0:
+                    return ret_code, self.fail_msg, response
+
+                try:
+                    resp_struct = json.loads(response.text)
+                    response_message = resp_struct['choices'][0]['message']['content'].strip()
+                except:
+                    return ret_code, self.fail_msg, response
+
+                # Add assistant response to message history
+                input_msgs.append({"role": "assistant", "content": response_message})
+
+                answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
+                if answers:
+                    return ret_code, answers, response
+                # Check for tool usage
+                if self.tool_start_token in response_message and self.tool_end_token in response_message:
+                    obs, reward, done, info = self.interpreter.execute(response_message)
+
+                    content_f = []
+                    content_f.append({"type": "text", "text": "<tool_response>"})
+                    if isinstance(obs, dict):
+                        images = obs.get('multi_modal_data', {}).get('image', [])
+                        # Embed execution textual output (strip control tokens)
+                        execution_text = obs['prompt']
+                        # Remove system specific tokens for readability
+                        execution_text = execution_text.replace("\n<|im_start|>user\n", "").replace("<|im_end|>\n<|im_start|>assistant\n", "")
+                        content_f.append({"type": "text", "text": execution_text})
+
+                        # Add captured images
+                        for im in images:
+                            try:
+                                im_b64 = encode_pil_image_to_base64(im)
+                                content_f.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{im_b64}"}})
+                            except Exception:
+                                pass
+
+                    elif isinstance(obs, str):
+                        content_f = [{"type": "text", "text": obs}]
+
+                    content_f.append({"type": "text", "text": "</tool_response>"})
+                    input_msgs.append({"role": "user", "content": content_f})
+                    # If interpreter signals completion after processing obs, return the response
+                    if done:
+                        return ret_code, response_message, response
+
+                    try_count += 1
+                else:
+                    # No tool usage detected, return the response
+                    break
+
+            return ret_code, response_message, response
+
+        except Exception as e:
+            self.logger.error(f"Error in tool use generation: {e}")
+            return 500, self.fail_msg, None
+        finally:
+            # Always cleanup interpreter temp files after generation
+            if hasattr(self, 'interpreter') and self.interpreter is not None:
+                self.interpreter.cleanup()

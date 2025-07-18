@@ -1,0 +1,20 @@
+{
+  "model": {
+    "vllm-Qwen2.5-VL-7B-Instruct": {
+      "class": "LMDeployAPIWithToolUse",
+      "api_base": "http://0.0.0.0:18902/v1/chat/completions",
+      "temperature": 0,
+      "retry": 10,
+      "use_tool": true,
+      "tool_start_token": "<python>",
+      "tool_end_token": "</python>",
+      "system_prompt": "You are a helpful assistant. To solve the question you must crop the image with use of python. Example answer format: <think>Object is not clear. I can ground the object and the object bbox is (0,100,200,300). I can crop it for a closer look</think> <python>\nfrom PIL import Image\nimg = Image.open(path_to_image) # path_to_image is pre-defined\ncropped_img = img.crop((0, 100, 200, 300))\ncropped_img.show()\n</python>"
+    }
+  },
+  "data": {
+    "VStarBench": {
+      "class": "ImageMCQDataset",
+      "dataset": "VStarBench"
+    }
+  }
+}
