@@ -58,6 +58,7 @@ Otherwise you can continue write python code for execution output, remember put 
         # Verify image data
         assert 'image' in self.multi_modal_data.keys(), f'[ERROR] No images in {origin_multi_modal_data.keys()}'
         assert len(self.multi_modal_data['image']) > 0, f'[ERROR] {self.multi_modal_data["image"]=}'
+        self._log("raw_prompt", raw_prompt)
         self.save_input_images()
 
     def execute(self, action_string: str, **kwargs) -> Tuple[str, float, bool, Dict]:
@@ -85,30 +86,7 @@ Otherwise you can continue write python code for execution output, remember put 
                     f"[PYTHON INTERPRETER DEBUG] Dropped malformed image with size: {img.size}"
                 )
 
-        # ------------------------------------------------------------------
-        # Enforce *size-change* rule: discard any output image whose dimensions
-        # exactly match **one** of the input images.  This is a simple heuristic
-        # requested by the user to prevent the policy from re-emitting the
-        # original picture unchanged.  We purposefully avoid expensive hash or
-        # perceptual comparisons – a strict equality check on (w, h) is cheap
-        # and sufficient for the current need.
-        # ------------------------------------------------------------------
-
-        filtered_images: List[Image.Image] = []
-        if self._input_img_sizes:
-            for img in processed_images:
-                if (img.width, img.height) in self._input_img_sizes:
-                    # Identical size – considered a copy; drop it.
-                    print(
-                        f"[PYTHON INTERPRETER DEBUG] Dropped image with unchanged size: {img.size}"
-                    )
-                    continue
-                filtered_images.append(img)
-        else:
-            # No input images cached (should not happen), keep all.
-            filtered_images = processed_images
-
-        captured_images = filtered_images
+        captured_images = processed_images
         
         if success:
             if len(captured_images) > 0:
@@ -143,8 +121,7 @@ Otherwise you can continue write python code for execution output, remember put 
             error_msg = self._summarise_error(output_text)
             if 'FileNotFoundError' in error_msg:
                 obs = (
-                    f"{output_text}\n"
-                    + "FileNotFoundError: To load the image, you must use Image.open(path_to_image)"
+                    f"FileNotFoundError: To load the image, you must use <python>Image.open(path_to_image)</python>"
                 )
             else:
                 obs = (
@@ -153,7 +130,7 @@ Otherwise you can continue write python code for execution output, remember put 
 
             reward = 0.0
             info = {"error": error_msg, "status": "failed"}
-
+        self._log(f"exec_string_{self.execution_count}", obs)
         return obs, reward, False, info
 
 
@@ -168,7 +145,7 @@ Otherwise you can continue write python code for execution output, remember put 
         """
         execution_script = self.create_safe_execution_environment(user_code)
         script_path = os.path.join(self.temp_dir, f"execution_{self.execution_count}.py")
-        
+
         with open(script_path, 'w', encoding="utf-8") as f:
             f.write(execution_script)
         
@@ -364,9 +341,40 @@ finally:
                 except Exception:
                     pass
 
-    
+    def _log(self, tag: str, payload: Any):
+        """Append an entry to *execution_log.txt*.
+
+        The *payload* can be any serialisable object; to make sure we always
+        succeed (and keep the implementation dependency-free), we fall back to
+        ``str(payload)`` when JSON serialisation is not possible.  Lists and
+        other containers are therefore explicitly converted to a string
+        representation to honour the user's request ("be careful to convert
+        list to str")."""
+
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+            # Best-effort JSON serialisation – falls back to plain ``str`` on
+            # failure so that *anything* can be logged without raising.
+            try:
+                if isinstance(payload, (dict, list, tuple)):
+                    payload_str = json.dumps(payload, default=str, ensure_ascii=False)
+                else:
+                    payload_str = str(payload)
+            except Exception:
+                payload_str = str(payload)
+
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] [{tag}] {payload_str}\n")
+        except Exception as e:
+            # The logger itself must never crash the interpreter – fallback to
+            # stderr if anything goes wrong.
+            print(f"[PYTHON INTERPRETER LOGGING ERROR] {e}")
+
     def cleanup(self):
         """Clean up temporary files"""
+        # remark for better debugging.
+        return
         try:
             import shutil
             if os.path.exists(self.temp_dir):

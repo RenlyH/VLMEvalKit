@@ -75,6 +75,14 @@ class ImageBaseDataset:
         self.data = data
         self.post_build(dataset)
 
+    def limit(self, n):
+        """
+        Limit the dataset to the first n records.
+        """
+        if n < len(self.data):
+            self.data = self.data.head(n)
+        return self
+
     def __len__(self):
         return len(self.data)
 
