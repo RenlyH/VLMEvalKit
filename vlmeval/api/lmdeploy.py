@@ -350,10 +350,9 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         self.use_tool = kwargs.get('use_tool', False)
         self.tool_start_token = kwargs.get('tool_start_token', None)
         self.tool_end_token = kwargs.get('tool_end_token', None)
+        self.verbose = kwargs.get('verbose', False)
         if self.use_tool:
             assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
-            # Initialize Python interpreter for tool use
-            self.interpreter = PythonInterpreter("python", "Python code execution", {})
 
     def generate(self, **kwargs):
         return super().generate(**kwargs)
@@ -361,10 +360,10 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
     def setup_interpreter_with_images(self, inputs):
         """Setup interpreter with input images"""
         if not self.use_tool:
-            return
+            return None
 
         # Create fresh interpreter instance for each generation call
-        self.interpreter = PythonInterpreter("python", "Python code execution", {})
+        interpreter = PythonInterpreter("python", "Python code execution", {})
 
         # Extract PIL Images from inputs (similar to prepare_itlist)
         from PIL import Image
@@ -378,7 +377,9 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         if images:
             # Reset interpreter with PIL Images
             multi_modal_data = {'image': images}
-            self.interpreter.reset("", multi_modal_data, multi_modal_data)
+            interpreter.reset(inputs, multi_modal_data, multi_modal_data)
+
+        return interpreter
 
     def generate_inner(self, inputs, **kwargs) -> str:
 
@@ -386,8 +387,7 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
             return super().generate_inner(inputs, **kwargs)
 
         # Setup interpreter with input images
-        self.setup_interpreter_with_images(inputs)
-
+        interpreter = self.setup_interpreter_with_images(inputs)
         input_msgs = self.prepare_inputs(inputs)
 
         temperature = kwargs.pop('temperature', self.temperature)
@@ -433,13 +433,14 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
                 # Add assistant response to message history
                 input_msgs.append({"role": "assistant", "content": response_message})
+                interpreter._log(f"Response_{interpreter.execution_count}", response_message)
 
                 answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
                 if answers:
                     return ret_code, answers, response
                 # Check for tool usage
                 if self.tool_start_token in response_message and self.tool_end_token in response_message:
-                    obs, reward, done, info = self.interpreter.execute(response_message)
+                    obs, reward, done, info = interpreter.execute(response_message)
 
                     content_f = []
                     content_f.append({"type": "text", "text": "<tool_response>"})
@@ -478,7 +479,74 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         except Exception as e:
             self.logger.error(f"Error in tool use generation: {e}")
             return 500, self.fail_msg, None
-        finally:
-            # Always cleanup interpreter temp files after generation
-            if hasattr(self, 'interpreter') and self.interpreter is not None:
-                self.interpreter.cleanup()
+        # finally:
+        #     # Always cleanup interpreter temp files after generation
+        #     if interpreter is not None:
+        #         interpreter.cleanup()
+
+
+if __name__ == '__main__':
+    from unittest.mock import patch, MagicMock
+    
+    # Mock environment variables and create instance
+    with patch.dict(os.environ, {'LMDEPLOY_API_KEY': 'test-key', 'LMDEPLOY_API_BASE': 'http://0.0.0.0:8000/v1/chat/completions'}):
+        with patch('requests.get') as mock_get:
+            # Mock the model list response
+            mock_response = MagicMock()
+            mock_response.json.return_value = {'data': [{'id': 'test-model'}]}
+            mock_get.return_value = mock_response
+            
+            # Create instance
+            api = LMDeployAPIWithToolUse(
+                model='test-model',
+                use_tool=True,
+                tool_start_token='<python>',
+                tool_end_token='</python>',
+                verbose=True
+            )
+    
+    # Test 1: Text-only input
+    print("Test 1: Text-only input")
+    inputs = [{'type': 'text', 'value': 'What is 2+2?'}]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 2: Multi-turn conversation
+    print("Test 2: Multi-turn conversation")
+    inputs = [
+        {'role': 'user', 'content': [{'type': 'text', 'value': 'Hello'}]},
+        {'role': 'assistant', 'content': [{'type': 'text', 'value': 'Hi there!'}]},
+        {'role': 'user', 'content': [{'type': 'text', 'value': 'How are you?'}]}
+    ]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 3: Text with image (simulated)
+    print("Test 3: Text with image")
+    inputs = [
+        {'type': 'text', 'value': 'Describe this image'},
+        {'type': 'image', 'value': '/path/to/image.jpg'}
+    ]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 4: generate_inner with mocked response
+    print("Test 4: generate_inner test")
+    with patch('requests.post') as mock_post:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"choices": [{"message": {"content": "The answer is 4"}}]}'
+        mock_post.return_value = mock_response
+        
+        inputs = [{'type': 'text', 'value': 'What is 2+2?'}]
+        ret_code, answer, _ = api.generate_inner(inputs)
+        print(f"Input: {inputs}")
+        print(f"Return code: {ret_code}, Answer: {answer}")
+    
+    print("All tests completed!")
