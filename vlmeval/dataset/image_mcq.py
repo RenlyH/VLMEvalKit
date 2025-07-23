@@ -2162,6 +2162,28 @@ class VLMBlind(ImageMCQDataset):
         result_df = pd.DataFrame(accuracy_dict)
         result_df['overall'] = result_df.mean(axis=1)
 
+        # Align the saving behavior with other MCQ style datasets so that a csv
+        # file is dumped to the same directory as the input `eval_file`.  This
+        # enables downstream scripts (e.g. result collection utilities in
+        # `run.py`) to pick the score file up automatically, which is the
+        # expected behaviour for the majority of benchmarks.  Previously the
+        # VLMBlind evaluate routine only returned the dataframe, therefore no
+        # artefact was written to disk and users could not find the
+        # “*_acc.csv” file after evaluation.
+
+        # Determine the score file path – we follow the naming convention used
+        # elsewhere: replace the original suffix (typically .xlsx) with
+        # `_acc.csv`.
+        if isinstance(eval_file, str):
+            # The evaluation file should always be a string path, but keep the
+            # check for robustness.
+            score_file = eval_file.rsplit('.', 1)[0] + '_acc.csv'
+            try:
+                dump(result_df, score_file)
+            except Exception:
+                # Fallback to pandas API if `dump` is somehow unavailable.
+                result_df.to_csv(score_file, index=False)
+
         return result_df
 
 
