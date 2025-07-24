@@ -14,7 +14,7 @@ from .bailingmm import bailingMMAPI
 from .bluelm_api import BlueLMWrapper, BlueLM_API
 from .jt_vl_chat import JTVLChatAPI
 from .taiyi import TaiyiAPI
-from .lmdeploy import LMDeployAPI, LMDeployAPIWithToolUse
+from .lmdeploy import LMDeployAPI, LMDeployAPIWithToolUse, LMDeployAPIWithCrop
 from .taichu import TaichuVLAPI, TaichuVLRAPI
 from .doubao_vl_api import DoubaoVL
 from .mug_u import MUGUAPI
