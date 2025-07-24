@@ -8,6 +8,8 @@ from ..utils import PythonInterpreter
 from ..utils.python_tool import extract_tool_call_contents
 import base64
 from io import BytesIO
+import threading
+from typing import List, Any
 
 def encode_pil_image_to_base64(image):
     """Convert PIL Image to base64 string"""
@@ -15,6 +17,44 @@ def encode_pil_image_to_base64(image):
     image.save(buffer, format='JPEG')
     img_str = base64.b64encode(buffer.getvalue()).decode()
     return img_str
+
+
+class ThreadSafeAppendOnlyArray:
+    """Thread-safe append-only array implementation using threading.Lock"""
+    
+    def __init__(self):
+        self._data = []
+        self._lock = threading.Lock()
+    
+    def append(self, item):
+        """Thread-safe append operation"""
+        with self._lock:
+            self._data.append(item)
+    
+    def extend(self, items):
+        """Thread-safe extend operation"""
+        with self._lock:
+            self._data.extend(items)
+    
+    def get_copy(self):
+        """Get a copy of the current data (thread-safe)"""
+        with self._lock:
+            return self._data.copy()
+    
+    def __len__(self):
+        """Thread-safe length operation"""
+        with self._lock:
+            return len(self._data)
+    
+    def __getitem__(self, index):
+        """Thread-safe item access"""
+        with self._lock:
+            return self._data[index]
+    
+    def __iter__(self):
+        """Thread-safe iteration (returns copy to avoid modification during iteration)"""
+        with self._lock:
+            return iter(self._data.copy())
 
 
 class InternVL2_PromptUtil:
@@ -353,9 +393,30 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         self.verbose = kwargs.get('verbose', False)
         if self.use_tool:
             assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
+        self.safe_append_array = ThreadSafeAppendOnlyArray()
+        self.save_file = None
+
+    def redact_images(self, inputs):
+        """Redact images from inputs"""
+        for msg in inputs:
+            if "content" in msg and isinstance(msg['content'], list):
+                for c in msg['content']:
+                    if 'image' in c['type']:
+                        # Redact image by removing the 'value' key
+                        c['image_url'] = '<REDACTED_IMAGE>'
+            else:
+                pass
+        return inputs
 
     def generate(self, **kwargs):
-        return super().generate(**kwargs)
+        ret = super().generate(**kwargs)
+        # save the array to file
+        if self.save_file is None:
+            self.save_file = kwargs.get('save_file', 'saved_results.jsonl')
+        with open(self.save_file, 'w') as f:
+            for item in self.safe_append_array.get_copy():
+                f.write(json.dumps(item) + '\n')
+        return ret
 
     def setup_interpreter_with_images(self, inputs):
         """Setup interpreter with input images"""
@@ -399,6 +460,7 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
         response_message = ""
         try_count = 0
+        ret = (500, self.fail_msg, None)
 
         try:
             while try_count < 10:  # Limit number of rounds
@@ -474,11 +536,13 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                     # No tool usage detected, return the response
                     break
 
-            return ret_code, response_message, response
-
+            ret = (ret_code, response_message, response)
         except Exception as e:
             self.logger.error(f"Error in tool use generation: {e}")
-            return 500, self.fail_msg, None
+        finally:
+            self.safe_append_array.append(self.redact_images(input_msgs))
+            return ret
+
         # finally:
         #     # Always cleanup interpreter temp files after generation
         #     if interpreter is not None:
