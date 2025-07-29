@@ -267,6 +267,9 @@ def main():
             model = build_model_from_config(cfg['model'], model_name, args.use_vllm)
 
         for _, dataset_name in enumerate(args.data):
+
+            model.save_file = './outputs/results/' + model_name + '_' + dataset_name + "_" + timestr() + '.jsonl'
+
             if WORLD_SIZE > 1:
                 dist.barrier()
 

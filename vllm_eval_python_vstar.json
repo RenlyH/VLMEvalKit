@@ -2,7 +2,7 @@
   "model": {
     "vllm-Qwen2.5-VL-7B-Instruct": {
       "class": "LMDeployAPIWithToolUse",
-      "api_base": "http://0.0.0.0:18902/v1/chat/completions",
+      "api_base": "http://0.0.0.0:8000/v1/chat/completions",
       "temperature": 0,
       "retry": 10,
       "use_tool": true,
