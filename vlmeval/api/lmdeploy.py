@@ -254,6 +254,8 @@ class LMDeployWrapper(BaseAPI):
             self.logger.info(f'using custom prompt {self.custom_prompt}')
         self.temperature = temperature
         self.logger.info(f'Init temperature: {self.temperature}')
+        self.safe_append_array = ThreadSafeAppendOnlyArray()
+        self.save_file = kwargs.get('save_file', 'saved_results.jsonl')
 
     def set_dump_image(self, dump_image_func):
         if self.custom_prompt in self.prompt_map:
@@ -372,6 +374,12 @@ class LMDeployWrapper(BaseAPI):
                 answer = mpo_post_processing(answer, kwargs.get('dataset'))
         except:
             pass
+        
+        logging_msgs = []
+        logging_msgs.append({"role": "system", "content": self.system_prompt})
+        logging_msgs.append({"role": "user", "content": inputs})
+        logging_msgs.append({"role": "assistant", "content": answer})
+        self.safe_append_array.append(logging_msgs)
         return ret_code, answer, response
 
 
@@ -381,7 +389,25 @@ class LMDeployAPI(LMDeployWrapper):
         super().__init__(**kwargs)
 
     def generate(self, message, dataset=None):
-        return super(LMDeployAPI, self).generate(message, dataset=dataset)\
+        ret = super(LMDeployAPI, self).generate(message, dataset=dataset)
+        with open(self.save_file, 'a') as f:
+            for item in self.safe_append_array.get_copy():
+                f.write(json.dumps(item) + '\n')
+        self.safe_append_array._data.clear()  # Clear after writing to prevent duplicates
+        return ret
+    
+    def redact_images(self, inputs, placeholder='<REDACTED_IMAGE>'):
+        """Redact images from inputs"""
+        for msg in inputs:
+            if "content" in msg and isinstance(msg['content'], list):
+                for c in msg['content']:
+                    if 'image' in c['type']:
+                        # Redact image by removing the 'value' key
+                        c['image_url'] = placeholder
+            else:
+                pass
+        return inputs
+
 
 class LMDeployAPIWithToolUse(LMDeployAPI):
 
@@ -393,29 +419,15 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         self.verbose = kwargs.get('verbose', False)
         if self.use_tool:
             assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
-        self.safe_append_array = ThreadSafeAppendOnlyArray()
-        self.save_file = None
 
-    def redact_images(self, inputs):
-        """Redact images from inputs"""
-        for msg in inputs:
-            if "content" in msg and isinstance(msg['content'], list):
-                for c in msg['content']:
-                    if 'image' in c['type']:
-                        # Redact image by removing the 'value' key
-                        c['image_url'] = '<REDACTED_IMAGE>'
-            else:
-                pass
-        return inputs
 
     def generate(self, **kwargs):
         ret = super().generate(**kwargs)
-        # save the array to file
-        if self.save_file is None:
-            self.save_file = kwargs.get('save_file', 'saved_results.jsonl')
-        with open(self.save_file, 'w') as f:
+
+        with open(self.save_file, 'a') as f:
             for item in self.safe_append_array.get_copy():
                 f.write(json.dumps(item) + '\n')
+        self.safe_append_array._data.clear()  # Clear after writing to prevent duplicates
         return ret
 
     def setup_interpreter_with_images(self, inputs):
@@ -499,7 +511,7 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
                 answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
                 if answers:
-                    return ret_code, answers, response
+                    return ret_code, answers[0], response
                 # Check for tool usage
                 if self.tool_start_token in response_message and self.tool_end_token in response_message:
                     obs, reward, done, info = interpreter.execute(response_message)
@@ -540,13 +552,15 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         except Exception as e:
             self.logger.error(f"Error in tool use generation: {e}")
         finally:
-            self.safe_append_array.append(self.redact_images(input_msgs))
-            return ret
-
-        # finally:
-        #     # Always cleanup interpreter temp files after generation
-        #     if interpreter is not None:
-        #         interpreter.cleanup()
+            # Redact images from input messages
+            placeholder = '<REDACTED_IMAGE>'
+            i = 0
+            while i < len(inputs) and inputs[i]['type'] == 'image':
+                placeholder = inputs[i]['value']
+                i += 1
+            self.safe_append_array.append(self.redact_images(input_msgs, placeholder=placeholder))
+        
+        return ret
 
 
 if __name__ == '__main__':

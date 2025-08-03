@@ -1,10 +1,10 @@
 {
   "model": {
-    "vllm-Qwen2.5-VL-7B-Instruct": {
+    "vllm-test": {
       "class": "LMDeployAPIWithToolUse",
-      "api_base": "http://0.0.0.0:8000/v1/chat/completions",
+      "api_base": "http://0.0.0.0:8001/v1/chat/completions",
       "temperature": 0,
-      "retry": 10,
+      "retry": 3,
       "use_tool": true,
       "tool_start_token": "<python>",
       "tool_end_token": "</python>",
