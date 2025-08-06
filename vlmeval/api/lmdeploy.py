@@ -56,6 +56,13 @@ class ThreadSafeAppendOnlyArray:
         with self._lock:
             return iter(self._data.copy())
 
+    def log_records_append_only(self, f):
+        with self._lock:
+            for i, item in enumerate(self._data.copy()):
+                f.write(json.dumps(item) + '\n')
+            # clear after writing to prevent duplicates
+            self._data.clear()
+
 
 class InternVL2_PromptUtil:
 
@@ -391,9 +398,7 @@ class LMDeployAPI(LMDeployWrapper):
     def generate(self, message, dataset=None):
         ret = super(LMDeployAPI, self).generate(message, dataset=dataset)
         with open(self.save_file, 'a') as f:
-            for item in self.safe_append_array.get_copy():
-                f.write(json.dumps(item) + '\n')
-        self.safe_append_array._data.clear()  # Clear after writing to prevent duplicates
+            self.safe_append_array.log_records_append_only(f)
         return ret
     
     def redact_images(self, inputs, placeholder='<REDACTED_IMAGE>'):
