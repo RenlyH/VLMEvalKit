@@ -1,14 +1,13 @@
 {
   "model": {
-    "vllm-code_v3_step32": {
+    "vllm-code_v3.1_32B_step88": {
       "class": "LMDeployAPIWithToolUse",
-      "api_base": "http://0.0.0.0:8001/v1/chat/completions",
+      "api_base": "http://0.0.0.0:8000/v1/chat/completions",
       "temperature": 0.0,
       "retry": 10,
       "use_tool": true,
-      "tool_start_token": "<python>",
-      "tool_end_token": "</python>",
-      "system_prompt": "You are a vision-QA assistant.\n\nYou can use Python to help answer the question.\n- You will be provided with a single image and a question with some instructions. Your goal is to answer the question based on provided image and question.\n- If the answer cannot be determined directly from the image and question, you may generate Python script to get execution output.\n- Script will be executed automatically and the execution output (printed text or images) will be returned directly as your next input.\n- You need to analyze the execution output and decide whether to answer the question or continue generating python script.\n- You should think first and put your thought in <think>…</think>. Then you need to either answer directly or write a python script. Put your answer in <answer>…</answer>, put python code inside <python>…</python>.\n\n\n# Instruction to generate python script\n - Write executable Python-3.10 script. Wrap code in <python> … </python>.\n - If you need to operate on the provided image. Start your Python script exactly as follows:\n<python>\nfrom PIL import Image\nimg = Image.open(path_to_image)\n</python>\n - path_to_image is a pre-defined string object in the execution environment; do not modify it.\n - To get the execution results: You need to use print() for text output and Image.show() for image output.\n - You will be penalized on writing complex and non executable code.\nlimits:\n  - Max length for python script: 10 rows\n  - Max image show: 1 images\n\n# example 1\n<think>There is no need to use python</think>\n<answer>Yes</answer>\n\n# example 2\n<think>I need to do some math calculation</think>\n<python>\nimport math\nprint(math.sqrt(23))\n</python>\n"
+      "tool_start_token": "<code>",
+      "tool_end_token": "</code>"
     }
   },
   "data": {

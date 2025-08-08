@@ -21,14 +21,14 @@ class PythonInterpreter(object):
     # Canonical registration name.  Using the short, generic label makes it
     # easier for dataset authors (`env_name="code"`).
 
-    code_start = "<python>"
-    code_end = "</python>"
+    code_start = "<code>"
+    code_end = "</code>"
     answer_start = "<answer>"
     answer_end = "</answer>"
     
     user_prompt = """Analyze provided output from the code execution and put it in <think> … </think>.
 If you can answer the question now, put your final answer within <answer> … </answer>.
-Otherwise you can continue write python code for execution output, remember put python code in <python> … </python>."""
+Otherwise you can continue write python code for execution output, remember put python code in <code> … </code>."""
 
 
     def __init__(self, _name, _desc, _params, **kwargs):
@@ -121,7 +121,7 @@ Otherwise you can continue write python code for execution output, remember put 
             error_msg = self._summarise_error(output_text)
             if 'FileNotFoundError' in error_msg:
                 obs = (
-                    f"FileNotFoundError: To load the image, you must use <python>Image.open(path_to_image)</python>"
+                    f"FileNotFoundError: To load the image, you must use {self.code_start}Image.open(path_to_image){self.code_end}"
                 )
             else:
                 obs = (
@@ -412,12 +412,12 @@ if __name__ == '__main__':
         
         # Execute broken code
         broken_code = """
-<python>
+<code>
 # This should fail - undefined variable
 print(undefined_variable)
 img = Image.open(path_to_image)
 img.show()
-</python>
+</code>
         """
         
         obs, reward, done, info = interpreter.execute(broken_code)
@@ -441,13 +441,13 @@ img.show()
         
         # Execute crop code
         crop_code = """
-<python>
+<code>
 img = Image.open(path_to_image)
 print(f"Original size: {img.size}")
 cropped = img.crop((100, 200, 300, 400))
 print(f"Cropped size: {cropped.size}")
 cropped.show()
-</python>
+</code>
         """
         
         obs, reward, done, info = interpreter.execute(crop_code)
@@ -471,11 +471,11 @@ cropped.show()
         
         # Execute simple math
         math_code = """
-<python>
+<code>
 result = 10 + 10
 print(f"Result: {result}")
 print("Math calculation completed!")
-</python>
+</code>
         """
         
         obs, reward, done, info = interpreter.execute(math_code)
@@ -499,13 +499,13 @@ print("Math calculation completed!")
         
         # Execute failing crop code (invalid coordinates)
         failing_crop_code = """
-<python>
+<code>
 img = Image.open(path_to_image)
 print(f"Original size: {img.size}")
 # This should fail - crop coordinates outside image bounds
 cropped = img.crop((1000, 2000, 3000, 4000))
 cropped.show()
-</python>
+</code>
         """
         
         obs, reward, done, info = interpreter.execute(failing_crop_code)
@@ -529,11 +529,10 @@ cropped.show()
         
         # Execute code with final answer
         answer_code = """
-        <python>
+        <code>
         img = Image.open(path_to_image)
         print(f"Image size: {img.size}")
-        </python>
-        
+        </code>
         <answer>
         The image is a product photo with dimensions of the loaded image.
         </answer>

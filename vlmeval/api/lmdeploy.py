@@ -583,8 +583,8 @@ if __name__ == '__main__':
             api = LMDeployAPIWithToolUse(
                 model='test-model',
                 use_tool=True,
-                tool_start_token='<python>',
-                tool_end_token='</python>',
+                tool_start_token='<code>',
+                tool_end_token='</code>',
                 verbose=True
             )
     
@@ -804,8 +804,8 @@ if __name__ == '__main__':
             api = LMDeployAPIWithToolUse(
                 model='test-model',
                 use_tool=True,
-                tool_start_token='<python>',
-                tool_end_token='</python>',
+                tool_start_token='<code>',
+                tool_end_token='</code>',
                 verbose=True
             )
     
