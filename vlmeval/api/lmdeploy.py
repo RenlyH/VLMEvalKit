@@ -8,6 +8,8 @@ from ..utils import PythonInterpreter
 from ..utils.python_tool import extract_tool_call_contents
 import base64
 from io import BytesIO
+import threading
+from typing import List, Any
 
 def encode_pil_image_to_base64(image):
     """Convert PIL Image to base64 string"""
@@ -15,6 +17,51 @@ def encode_pil_image_to_base64(image):
     image.save(buffer, format='JPEG')
     img_str = base64.b64encode(buffer.getvalue()).decode()
     return img_str
+
+
+class ThreadSafeAppendOnlyArray:
+    """Thread-safe append-only array implementation using threading.Lock"""
+    
+    def __init__(self):
+        self._data = []
+        self._lock = threading.Lock()
+    
+    def append(self, item):
+        """Thread-safe append operation"""
+        with self._lock:
+            self._data.append(item)
+    
+    def extend(self, items):
+        """Thread-safe extend operation"""
+        with self._lock:
+            self._data.extend(items)
+    
+    def get_copy(self):
+        """Get a copy of the current data (thread-safe)"""
+        with self._lock:
+            return self._data.copy()
+    
+    def __len__(self):
+        """Thread-safe length operation"""
+        with self._lock:
+            return len(self._data)
+    
+    def __getitem__(self, index):
+        """Thread-safe item access"""
+        with self._lock:
+            return self._data[index]
+    
+    def __iter__(self):
+        """Thread-safe iteration (returns copy to avoid modification during iteration)"""
+        with self._lock:
+            return iter(self._data.copy())
+
+    def log_records_append_only(self, f):
+        with self._lock:
+            for i, item in enumerate(self._data.copy()):
+                f.write(json.dumps(item) + '\n')
+            # clear after writing to prevent duplicates
+            self._data.clear()
 
 
 class InternVL2_PromptUtil:
@@ -214,6 +261,8 @@ class LMDeployWrapper(BaseAPI):
             self.logger.info(f'using custom prompt {self.custom_prompt}')
         self.temperature = temperature
         self.logger.info(f'Init temperature: {self.temperature}')
+        self.safe_append_array = ThreadSafeAppendOnlyArray()
+        self.save_file = kwargs.get('save_file', 'saved_results.jsonl')
 
     def set_dump_image(self, dump_image_func):
         if self.custom_prompt in self.prompt_map:
@@ -332,6 +381,12 @@ class LMDeployWrapper(BaseAPI):
                 answer = mpo_post_processing(answer, kwargs.get('dataset'))
         except:
             pass
+        
+        logging_msgs = []
+        logging_msgs.append({"role": "system", "content": self.system_prompt})
+        logging_msgs.append({"role": "user", "content": inputs})
+        logging_msgs.append({"role": "assistant", "content": answer})
+        self.safe_append_array.append(logging_msgs)
         return ret_code, answer, response
 
 
@@ -341,7 +396,23 @@ class LMDeployAPI(LMDeployWrapper):
         super().__init__(**kwargs)
 
     def generate(self, message, dataset=None):
-        return super(LMDeployAPI, self).generate(message, dataset=dataset)\
+        ret = super(LMDeployAPI, self).generate(message, dataset=dataset)
+        with open(self.save_file, 'a') as f:
+            self.safe_append_array.log_records_append_only(f)
+        return ret
+    
+    def redact_images(self, inputs, placeholder='<REDACTED_IMAGE>'):
+        """Redact images from inputs"""
+        for msg in inputs:
+            if "content" in msg and isinstance(msg['content'], list):
+                for c in msg['content']:
+                    if 'image' in c['type']:
+                        # Redact image by removing the 'value' key
+                        c['image_url'] = placeholder
+            else:
+                pass
+        return inputs
+
 
 class LMDeployAPIWithToolUse(LMDeployAPI):
 
@@ -354,8 +425,15 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         if self.use_tool:
             assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
 
+
     def generate(self, **kwargs):
-        return super().generate(**kwargs)
+        ret = super().generate(**kwargs)
+
+        with open(self.save_file, 'a') as f:
+            for item in self.safe_append_array.get_copy():
+                f.write(json.dumps(item) + '\n')
+        self.safe_append_array._data.clear()  # Clear after writing to prevent duplicates
+        return ret
 
     def setup_interpreter_with_images(self, inputs):
         """Setup interpreter with input images"""
@@ -389,6 +467,207 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         # Setup interpreter with input images
         interpreter = self.setup_interpreter_with_images(inputs)
         input_msgs = self.prepare_inputs(inputs)
+
+        temperature = kwargs.pop('temperature', self.temperature)
+        self.logger.info(f'Generate temperature: {temperature}')
+        max_tokens = kwargs.pop('max_tokens', self.max_tokens)
+        dataset = kwargs.pop('dataset', None)
+
+        headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {self.key}'}
+
+        response_message = ""
+        try_count = 0
+        ret = (500, self.fail_msg, None)
+
+        try:
+            while try_count < 10:  # Limit number of rounds
+                # Prepare payload with tool stop token
+                payload = dict(
+                    model=self.model,
+                    messages=input_msgs,
+                    max_tokens=max_tokens,
+                    n=1,
+                    temperature=temperature,
+                    stop=[self.tool_end_token],
+                    include_stop_str_in_output=True,
+                    **kwargs)
+
+                response = requests.post(
+                    self.api_base,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=self.timeout * 1.1)
+
+                ret_code = response.status_code
+                ret_code = 0 if (200 <= int(ret_code) < 300) else ret_code
+
+                if ret_code != 0:
+                    return ret_code, self.fail_msg, response
+
+                try:
+                    resp_struct = json.loads(response.text)
+                    response_message = resp_struct['choices'][0]['message']['content'].strip()
+                except:
+                    return ret_code, self.fail_msg, response
+
+                # Add assistant response to message history
+                input_msgs.append({"role": "assistant", "content": response_message})
+                interpreter._log(f"Response_{interpreter.execution_count}", response_message)
+
+                answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
+                if answers:
+                    return ret_code, answers[0], response
+                # Check for tool usage
+                if self.tool_start_token in response_message and self.tool_end_token in response_message:
+                    obs, reward, done, info = interpreter.execute(response_message)
+
+                    content_f = []
+                    content_f.append({"type": "text", "text": "<tool_response>"})
+                    if isinstance(obs, dict):
+                        images = obs.get('multi_modal_data', {}).get('image', [])
+                        # Embed execution textual output (strip control tokens)
+                        execution_text = obs['prompt']
+                        # Remove system specific tokens for readability
+                        execution_text = execution_text.replace("\n<|im_start|>user\n", "").replace("<|im_end|>\n<|im_start|>assistant\n", "")
+                        content_f.append({"type": "text", "text": execution_text})
+
+                        # Add captured images
+                        for im in images:
+                            try:
+                                im_b64 = encode_pil_image_to_base64(im)
+                                content_f.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{im_b64}"}})
+                            except Exception:
+                                pass
+
+                    elif isinstance(obs, str):
+                        content_f.append({"type": "text", "text": obs})
+
+                    content_f.append({"type": "text", "text": "</tool_response>"})
+                    input_msgs.append({"role": "user", "content": content_f})
+                    # If interpreter signals completion after processing obs, return the response
+                    if done:
+                        return ret_code, response_message, response
+
+                    try_count += 1
+                else:
+                    # No tool usage detected, return the response
+                    break
+
+            ret = (ret_code, response_message, response)
+        except Exception as e:
+            self.logger.error(f"Error in tool use generation: {e}")
+        finally:
+            # Redact images from input messages
+            placeholder = '<REDACTED_IMAGE>'
+            i = 0
+            while i < len(inputs) and inputs[i]['type'] == 'image':
+                placeholder = inputs[i]['value']
+                i += 1
+            self.safe_append_array.append(self.redact_images(input_msgs, placeholder=placeholder))
+        
+        return ret
+
+
+if __name__ == '__main__':
+    from unittest.mock import patch, MagicMock
+    
+    # Mock environment variables and create instance
+    with patch.dict(os.environ, {'LMDEPLOY_API_KEY': 'test-key', 'LMDEPLOY_API_BASE': 'http://0.0.0.0:8000/v1/chat/completions'}):
+        with patch('requests.get') as mock_get:
+            # Mock the model list response
+            mock_response = MagicMock()
+            mock_response.json.return_value = {'data': [{'id': 'test-model'}]}
+            mock_get.return_value = mock_response
+            
+            # Create instance
+            api = LMDeployAPIWithToolUse(
+                model='test-model',
+                use_tool=True,
+                tool_start_token='<code>',
+                tool_end_token='</code>',
+                verbose=True
+            )
+    
+    # Test 1: Text-only input
+    print("Test 1: Text-only input")
+    inputs = [{'type': 'text', 'value': 'What is 2+2?'}]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 2: Multi-turn conversation
+    print("Test 2: Multi-turn conversation")
+    inputs = [
+        {'role': 'user', 'content': [{'type': 'text', 'value': 'Hello'}]},
+        {'role': 'assistant', 'content': [{'type': 'text', 'value': 'Hi there!'}]},
+        {'role': 'user', 'content': [{'type': 'text', 'value': 'How are you?'}]}
+    ]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 3: Text with image (simulated)
+    print("Test 3: Text with image")
+    inputs = [
+        {'type': 'text', 'value': 'Describe this image'},
+        {'type': 'image', 'value': '/path/to/image.jpg'}
+    ]
+    result = api.prepare_inputs(inputs)
+    print(f"Input: {inputs}")
+    print(f"Output: {result}")
+    print()
+    
+    # Test 4: generate_inner with mocked response
+    print("Test 4: generate_inner test")
+    with patch('requests.post') as mock_post:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"choices": [{"message": {"content": "The answer is 4"}}]}'
+        mock_post.return_value = mock_response
+        
+        inputs = [{'type': 'text', 'value': 'What is 2+2?'}]
+        ret_code, answer, _ = api.generate_inner(inputs)
+        print(f"Input: {inputs}")
+        print(f"Return code: {ret_code}, Answer: {answer}")
+    
+    print("All tests completed!")
+
+
+IMAGE_FACTOR = 28
+MIN_PIXELS = 4 * 28 * 28
+MAX_PIXELS = 16384 * 28 * 28
+
+import math
+class LMDeployAPIWithCrop(LMDeployAPI):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.use_tool = kwargs.get('use_tool', False)
+        self.tool_start_token = kwargs.get('tool_start_token', None)
+        self.tool_end_token = kwargs.get('tool_end_token', None)
+        self.verbose = kwargs.get('verbose', False)
+        assert self.tool_start_token == '<tool_call>'
+        if self.use_tool:
+            assert self.tool_start_token and self.tool_end_token, "Both tool_start_token and tool_end_token must be provided when use_tool is True"
+
+    def generate(self, **kwargs):
+        return super().generate(**kwargs)
+
+    def generate_inner(self, inputs, **kwargs) -> str:
+
+        if not self.use_tool:
+            return super().generate_inner(inputs, **kwargs)
+
+        # Setup interpreter with input images
+        input_msgs = self.prepare_inputs(inputs)
+        for msg in inputs:
+            if msg['type'] == 'image':
+                # msg['value'] is the image path
+                pil_img = Image.open(msg['value'])
+        user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer>"
+        input_msgs.append(dict(role='user', content=user_msg))
 
         temperature = kwargs.pop('temperature', self.temperature)
         self.logger.info(f'Generate temperature: {temperature}')
@@ -433,41 +712,41 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
                 # Add assistant response to message history
                 input_msgs.append({"role": "assistant", "content": response_message})
-                interpreter._log(f"Response_{interpreter.execution_count}", response_message)
 
                 answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
                 if answers:
                     return ret_code, answers, response
                 # Check for tool usage
                 if self.tool_start_token in response_message and self.tool_end_token in response_message:
-                    obs, reward, done, info = interpreter.execute(response_message)
+                    action_list = response_message.split(self.tool_start_token)[1].split(self.tool_end_token)[0].strip()
+                    action_list = eval(action_list)
+
+                    bbox_list = []
+                    cropped_pil_image_content_list = []
+
+                    bbox_str = action_list['arguments']['bbox_2d']
+                    bbox = bbox_str
+                    left, top, right, bottom = bbox
+                    cropped_image = pil_img.crop((left, top, right, bottom))
+                    new_w, new_h = smart_resize((right - left), (bottom - top), factor=IMAGE_FACTOR)
+                    cropped_image = cropped_image.resize((new_w, new_h), resample=Image.BICUBIC)
+                    cropped_pil_image = encode_pil_image_to_base64(cropped_image)
+                    bbox_list.append(bbox)
+                    cropped_pil_image_content = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{cropped_pil_image}"}}
+                    cropped_pil_image_content_list.append(cropped_pil_image_content)
+
+                    if len(bbox_list) == 1:
+                        bbox_list = bbox_list[0]
 
                     content_f = []
                     content_f.append({"type": "text", "text": "<tool_response>"})
-                    if isinstance(obs, dict):
-                        images = obs.get('multi_modal_data', {}).get('image', [])
-                        # Embed execution textual output (strip control tokens)
-                        execution_text = obs['prompt']
-                        # Remove system specific tokens for readability
-                        execution_text = execution_text.replace("\n<|im_start|>user\n", "").replace("<|im_end|>\n<|im_start|>assistant\n", "")
-                        content_f.append({"type": "text", "text": execution_text})
-
-                        # Add captured images
-                        for im in images:
-                            try:
-                                im_b64 = encode_pil_image_to_base64(im)
-                                content_f.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{im_b64}"}})
-                            except Exception:
-                                pass
-
-                    elif isinstance(obs, str):
-                        content_f = [{"type": "text", "text": obs}]
-
+                    for cropped_pil_image_content in cropped_pil_image_content_list:
+                        content_f.append(cropped_pil_image_content)
+                    content_f.append({"type": "text", "text": user_msg})
                     content_f.append({"type": "text", "text": "</tool_response>"})
+
                     input_msgs.append({"role": "user", "content": content_f})
                     # If interpreter signals completion after processing obs, return the response
-                    if done:
-                        return ret_code, response_message, response
 
                     try_count += 1
                 else:
@@ -479,10 +758,35 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         except Exception as e:
             self.logger.error(f"Error in tool use generation: {e}")
             return 500, self.fail_msg, None
-        # finally:
-        #     # Always cleanup interpreter temp files after generation
-        #     if interpreter is not None:
-        #         interpreter.cleanup()
+
+
+# the following code is copied from qwen-vl-utils
+def round_by_factor(number: int, factor: int) -> int:
+    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    return round(number / factor) * factor
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+    return math.ceil(number / factor) * factor
+
+def floor_by_factor(number: int, factor: int) -> int:
+    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    return math.floor(number / factor) * factor
+
+def smart_resize(
+    height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
+) -> tuple[int, int]:
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
 
 
 if __name__ == '__main__':
@@ -500,8 +804,8 @@ if __name__ == '__main__':
             api = LMDeployAPIWithToolUse(
                 model='test-model',
                 use_tool=True,
-                tool_start_token='<python>',
-                tool_end_token='</python>',
+                tool_start_token='<code>',
+                tool_end_token='</code>',
                 verbose=True
             )
     

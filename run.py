@@ -267,6 +267,9 @@ def main():
             model = build_model_from_config(cfg['model'], model_name, args.use_vllm)
 
         for _, dataset_name in enumerate(args.data):
+            os.makedirs('./outputs/results/', exist_ok=True)
+            model.save_file = './outputs/results/' + model_name + '_' + dataset_name + "_" + timestr() + '.jsonl'
+
             if WORLD_SIZE > 1:
                 dist.barrier()
 
@@ -376,7 +379,7 @@ def main():
                         elif listinstr(['VisuLogic'], dataset_name):
                             judge_kwargs['model'] = 'exact_matching'
                         else:
-                            judge_kwargs['model'] = 'chatgpt-0125'
+                            judge_kwargs['model'] = 'gpt-4o-mini'
                     elif listinstr(['MMVet', 'LLaVABench', 'MMBench_Video'], dataset_name):
                         judge_kwargs['model'] = 'gpt-4-turbo'
                     elif listinstr(['VGRPBench'], dataset_name):
