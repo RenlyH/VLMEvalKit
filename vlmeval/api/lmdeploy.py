@@ -540,7 +540,7 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                                 pass
 
                     elif isinstance(obs, str):
-                        content_f = [{"type": "text", "text": obs}]
+                        content_f.append({"type": "text", "text": obs})
 
                     content_f.append({"type": "text", "text": "</tool_response>"})
                     input_msgs.append({"role": "user", "content": content_f})
