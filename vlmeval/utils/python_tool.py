@@ -70,6 +70,7 @@ Otherwise you can continue write python code for execution output, remember put 
             return "", 0.0, True, {}
         
         codes = extract_tool_call_contents(self.code_start, self.code_end, action_string)
+        codes = [code.replace("```python",'').replace('```','') for code in codes]
         if not codes:
             return "", 0.0, False, {}
         code = "\n".join(code.strip() for code in codes)
