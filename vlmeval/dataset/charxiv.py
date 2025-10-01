@@ -23,7 +23,8 @@ def auxeval(judge_model: Any, line: pd.Series, **kwargs: Any) -> Dict[str, Any]:
         Dict containing evaluation results with extract_answer and score
     """
     failure_result = {"extract_answer": "Failed to parse response", "score": 0.0}
-    prompt = line["grading_query"].replace("{PREDICTION}", line["prediction"])
+    prediction = line["prediction"] if pd.notna(line["prediction"]) else "No response provided"
+    prompt = line["grading_query"].replace("{PREDICTION}", str(prediction))
 
     retry = kwargs.get("retry", 10)
     max_tokens = kwargs.get("max_tokens", 256)
