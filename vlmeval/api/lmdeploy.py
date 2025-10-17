@@ -666,8 +666,8 @@ class LMDeployAPIWithCrop(LMDeployAPI):
             if msg['type'] == 'image':
                 # msg['value'] is the image path
                 pil_img = Image.open(msg['value'])
-        user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer>"
-        input_msgs.append(dict(role='user', content=user_msg))
+        # user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer>"
+        # input_msgs.append(dict(role='user', content=user_msg))
 
         temperature = kwargs.pop('temperature', self.temperature)
         self.logger.info(f'Generate temperature: {temperature}')
@@ -727,6 +727,36 @@ class LMDeployAPIWithCrop(LMDeployAPI):
                     bbox_str = action_list['arguments']['bbox_2d']
                     bbox = bbox_str
                     left, top, right, bottom = bbox
+
+                    # Check if this is crop_image_normalized or image_zoom_in_tool
+                    tool_name = action_list['name']
+
+                    if tool_name == 'crop_image_normalized':
+                        # Normalized coordinates (0-1) with padding
+                        img_x, img_y = pil_img.size
+                        padding = 0.1
+
+                        # Check if already normalized or need to normalize
+                        if bbox[0] < 1 and bbox[1] < 1 and bbox[2] < 1 and bbox[3] < 1:
+                            normalized_bbox_2d = (float(bbox[0])-padding, float(bbox[1])-padding,
+                                                  float(bbox[2])+padding, float(bbox[3])+padding)
+                        else:
+                            normalized_bbox_2d = (float(bbox[0])/img_x-padding, float(bbox[1])/img_y-padding,
+                                                  float(bbox[2])/img_x+padding, float(bbox[3])/img_y+padding)
+
+                        # Clamp to [0, 1]
+                        normalized_x1 = min(max(0, normalized_bbox_2d[0]), 1)
+                        normalized_y1 = min(max(0, normalized_bbox_2d[1]), 1)
+                        normalized_x2 = min(max(0, normalized_bbox_2d[2]), 1)
+                        normalized_y2 = min(max(0, normalized_bbox_2d[3]), 1)
+
+                        # Convert back to pixel coordinates
+                        left = normalized_x1 * img_x
+                        top = normalized_y1 * img_y
+                        right = normalized_x2 * img_x
+                        bottom = normalized_y2 * img_y
+
+                    # Crop and resize (same for both tools)
                     cropped_image = pil_img.crop((left, top, right, bottom))
                     new_w, new_h = smart_resize((right - left), (bottom - top), factor=IMAGE_FACTOR)
                     cropped_image = cropped_image.resize((new_w, new_h), resample=Image.BICUBIC)
@@ -742,7 +772,7 @@ class LMDeployAPIWithCrop(LMDeployAPI):
                     content_f.append({"type": "text", "text": "<tool_response>"})
                     for cropped_pil_image_content in cropped_pil_image_content_list:
                         content_f.append(cropped_pil_image_content)
-                    content_f.append({"type": "text", "text": user_msg})
+                    # content_f.append({"type": "text", "text": user_msg})
                     content_f.append({"type": "text", "text": "</tool_response>"})
 
                     input_msgs.append({"role": "user", "content": content_f})
