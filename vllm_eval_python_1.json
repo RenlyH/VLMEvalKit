@@ -1,8 +1,8 @@
 {
   "model": {
-    "vllm-code_v3.1_7B_n8_step400_sp": {
+    "vllm-code_v3.2_n8_step296_sp": {
       "class": "LMDeployAPIWithToolUse",
-      "api_base": "http://0.0.0.0:8000/v1/chat/completions",
+      "api_base": "http://localhost:8000/v1/chat/completions",
       "temperature": 0.0,
       "retry": 10,
       "use_tool": true,

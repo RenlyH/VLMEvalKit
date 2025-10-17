@@ -20,6 +20,10 @@
       "class": "MathVista",
       "dataset": "MathVista_MINI"
     },
+    "VStarBench": {
+      "class": "ImageMCQDataset",
+      "dataset": "VStarBench"
+    },
     "CharXiv_descriptive_val":{
       "class": "CharXiv",
       "dataset": "CharXiv_descriptive_val"
@@ -31,6 +35,22 @@
     "VLMBlind":{
       "class": "VLMBlind",
       "dataset": "VLMBlind"
+    },
+    "HRBench4K": {
+      "class": "HRBenchDataset",
+      "dataset": "HRBench4K"
+    },
+    "HRBench8K": {
+      "class": "HRBenchDataset",
+      "dataset": "HRBench8K"
+    },
+    "MathVerse_MINI": {
+      "class": "MathVerse",
+      "dataset": "MathVerse_MINI"
+    },
+    "MathVision_MINI": {
+      "class": "MathVision",
+      "dataset": "MathVision_MINI"
     }
   }
 }
