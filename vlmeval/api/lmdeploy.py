@@ -517,7 +517,11 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                 answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
                 if answers:
                     return ret_code, answers[0], response
-                # Check for tool usage
+
+                # Check for tool usage - add missing end token if needed (model may stop before generating it)
+                if self.tool_start_token in response_message and self.tool_end_token not in response_message:
+                    response_message = response_message + self.tool_end_token
+
                 if self.tool_start_token in response_message and self.tool_end_token in response_message:
                     obs, reward, done, info = interpreter.execute(response_message)
 
@@ -656,6 +660,18 @@ class LMDeployAPIWithCrop(LMDeployAPI):
         return super().generate(**kwargs)
 
     def generate_inner(self, inputs, **kwargs) -> str:
+        if "DeepEyes" in self.model:
+            user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer> "
+            for item in inputs[::-1]:
+                if item['type'] == 'text':
+                    item['value'] += user_msg
+                    break
+        elif "PixelReasoner" in self.model:
+            user_msg = "\n\nGuidelines: Understand the given visual information and the user query. Determine if it is beneficial to employ the given visual operations (tools). For a video, we can look closer by `select_frames`. For an image, we can look closer by `crop_image_normalized`. Reason with the visual information step by step, and put your final answer within \\boxed{}."
+            for item in inputs[::-1]:
+                if item['type'] == 'text':
+                    item['value'] += user_msg
+                    break
 
         if not self.use_tool:
             return super().generate_inner(inputs, **kwargs)
@@ -666,8 +682,6 @@ class LMDeployAPIWithCrop(LMDeployAPI):
             if msg['type'] == 'image':
                 # msg['value'] is the image path
                 pil_img = Image.open(msg['value'])
-        # user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer>"
-        # input_msgs.append(dict(role='user', content=user_msg))
 
         temperature = kwargs.pop('temperature', self.temperature)
         self.logger.info(f'Generate temperature: {temperature}')
@@ -678,9 +692,9 @@ class LMDeployAPIWithCrop(LMDeployAPI):
 
         response_message = ""
         try_count = 0
-
+        ret = (500, self.fail_msg, None)
         try:
-            while try_count < 10:  # Limit number of rounds
+            while try_count < 5:  # Limit number of rounds
                 # Prepare payload with tool stop token
                 payload = dict(
                     model=self.model,
@@ -713,36 +727,70 @@ class LMDeployAPIWithCrop(LMDeployAPI):
                 # Add assistant response to message history
                 input_msgs.append({"role": "assistant", "content": response_message})
 
-                answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
-                if answers:
-                    return ret_code, answers, response
-                # Check for tool usage
+                # Cascade answer extraction: try \boxed{} first, then <answer> tags
+                # Extract \boxed{} format (PixelReasoner style)
+                boxed_answers = extract_tool_call_contents("\\boxed{", "}", response_message)
+                if boxed_answers:
+                    ret = (ret_code, boxed_answers[0], response)
+                    return ret
+
+                # Extract <answer> tags (DeepEyes style)
+                answer_tag_answers = extract_tool_call_contents("<answer>", "</answer>", response_message)
+                if answer_tag_answers:
+                    ret = (ret_code, answer_tag_answers[0], response)
+                    return ret
+
+                # Check for tool usage - add missing end token if needed (model may stop before generating it)
+                if self.tool_start_token in response_message and self.tool_end_token not in response_message:
+                    response_message = response_message + self.tool_end_token
+
                 if self.tool_start_token in response_message and self.tool_end_token in response_message:
-                    action_list = response_message.split(self.tool_start_token)[1].split(self.tool_end_token)[0].strip()
-                    action_list = eval(action_list)
+                    action_str = response_message.split(self.tool_start_token)[1].split(self.tool_end_token)[0].strip()
+                    # Try to parse as JSON first, fall back to eval if needed
+                    try:
+                        action_list = json.loads(action_str)
+                    except:
+                        # Replace single quotes with double quotes for JSON compatibility
+                        action_str = action_str.replace("'", '"')
+                        try:
+                            action_list = json.loads(action_str)
+                        except:
+                            # Last resort: use eval
+                            action_list = eval(action_str)
 
                     bbox_list = []
                     cropped_pil_image_content_list = []
+
+                    # Check if this is a supported image crop tool (not select_frames or other tools)
+                    tool_name = action_list.get('name', '')
+                    supported_tools = ['crop_image_normalized', 'image_zoom_in_tool']
+                    if tool_name not in supported_tools:
+                        self.logger.warning(f"Unsupported tool call: {tool_name}. Skipping tool execution.")
+                        break
+
+                    if 'bbox_2d' not in action_list.get('arguments', {}):
+                        self.logger.error(f"Tool call missing bbox_2d argument. Action list: {action_list}")
+                        break
 
                     bbox_str = action_list['arguments']['bbox_2d']
                     bbox = bbox_str
                     left, top, right, bottom = bbox
 
-                    # Check if this is crop_image_normalized or image_zoom_in_tool
-                    tool_name = action_list['name']
-
-                    if tool_name == 'crop_image_normalized':
-                        # Normalized coordinates (0-1) with padding
+                    # Both crop_image_normalized and image_zoom_in_tool use the same logic
+                    if tool_name in ['crop_image_normalized', 'image_zoom_in_tool']:
+                        # Normalized coordinates (0-1) with adaptive padding
                         img_x, img_y = pil_img.size
-                        padding = 0.1
+                        # Adaptive padding: cap at 600 pixels to avoid excessive padding on high-res images
+                        padding_x = min(0.1, 600.0/img_x)
+                        padding_y = min(0.1, 600.0/img_y)
 
                         # Check if already normalized or need to normalize
                         if bbox[0] < 1 and bbox[1] < 1 and bbox[2] < 1 and bbox[3] < 1:
-                            normalized_bbox_2d = (float(bbox[0])-padding, float(bbox[1])-padding,
-                                                  float(bbox[2])+padding, float(bbox[3])+padding)
+                            normalized_bbox_2d = (float(bbox[0])-padding_x, float(bbox[1])-padding_y,
+                                                  float(bbox[2])+padding_x, float(bbox[3])+padding_y)
                         else:
-                            normalized_bbox_2d = (float(bbox[0])/img_x-padding, float(bbox[1])/img_y-padding,
-                                                  float(bbox[2])/img_x+padding, float(bbox[3])/img_y+padding)
+                            normalized_bbox_2d = (float(bbox[0])/img_x-padding_x, float(bbox[1])/img_y-padding_y,
+                                                  float(bbox[2])/img_x+padding_x, float(bbox[3])/img_y+padding_y)
 
                         # Clamp to [0, 1]
                         normalized_x1 = min(max(0, normalized_bbox_2d[0]), 1)
@@ -769,25 +817,36 @@ class LMDeployAPIWithCrop(LMDeployAPI):
                         bbox_list = bbox_list[0]
 
                     content_f = []
-                    content_f.append({"type": "text", "text": "<tool_response>"})
+                    if "DeepEyes" in self.model:
+                        content_f.append({"type": "text", "text": "<tool_response>"})
+                    else:
+                        content_f.append({"type": "text", "text": f"Here is the cropped image (Image Size: {cropped_image.size[0]}x{cropped_image.size[1]}):"})
                     for cropped_pil_image_content in cropped_pil_image_content_list:
                         content_f.append(cropped_pil_image_content)
-                    # content_f.append({"type": "text", "text": user_msg})
-                    content_f.append({"type": "text", "text": "</tool_response>"})
+                    if "DeepEyes" in self.model:
+                        content_f.append({"type": "text", "text": user_msg})
+                        content_f.append({"type": "text", "text": "</tool_response>"})
 
                     input_msgs.append({"role": "user", "content": content_f})
-                    # If interpreter signals completion after processing obs, return the response
 
                     try_count += 1
                 else:
                     # No tool usage detected, return the response
                     break
 
-            return ret_code, response_message, response
-
+            ret = (ret_code, response_message, response)
         except Exception as e:
             self.logger.error(f"Error in tool use generation: {e}")
-            return 500, self.fail_msg, None
+        finally:
+            # Redact images from input messages
+            placeholder = '<REDACTED_IMAGE>'
+            i = 0
+            while i < len(inputs) and inputs[i]['type'] == 'image':
+                placeholder = inputs[i]['value']
+                i += 1
+            self.safe_append_array.append(self.redact_images(input_msgs, placeholder=placeholder))
+
+        return ret
 
 
 # the following code is copied from qwen-vl-utils
