@@ -5,6 +5,7 @@ import tempfile
 import traceback
 import subprocess
 import time
+import textwrap
 from typing import Dict, Any, Tuple, Optional, List
 from PIL import Image
 from io import BytesIO
@@ -365,7 +366,19 @@ class PythonInterpreter(object):
         A single '[EXECUTION_ERROR] …' line is printed on failure.
         """
         if user_code.strip():
-            indented_code = "\n".join("        " + ln for ln in user_code.splitlines())
+            # Normalize indentation first (removes common leading whitespace)
+            # This fixes model bugs like " sock_identified = ..." (extra leading space)
+            normalized_code = textwrap.dedent(user_code)
+            indented_code = "\n".join("        " + ln for ln in normalized_code.splitlines())
+
+            # Handle comments-only case: if no executable statements exist,
+            # add 'pass' to avoid IndentationError in the with block
+            has_executable = any(
+                line.strip() and not line.strip().startswith('#')
+                for line in normalized_code.splitlines()
+            )
+            if not has_executable:
+                indented_code += "\n        pass"
         else:
             indented_code = "        pass"  # placeholder to satisfy Python grammar
 
