@@ -440,22 +440,43 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         if not self.use_tool:
             return None
 
-        # Create fresh interpreter instance for each generation call
-        interpreter = PythonInterpreter("python", "Python code execution", {})
+        # Extract image path and filename from inputs
+        image_path = None
+        image_filename = None
+        aux_img_dir = None
+        image_size = None
 
-        # Extract PIL Images from inputs (similar to prepare_itlist)
+        for msg in inputs:
+            if msg['type'] == 'image':
+                # msg['value'] is the full image path, e.g., '/home/xinhaih/LMUData/images/MathVista_MINI/1.jpg'
+                image_path = msg['value']
+                image_filename = os.path.basename(image_path)  # '1.jpg'
+                aux_img_dir = os.path.dirname(image_path)  # '/home/xinhaih/LMUData/images/MathVista_MINI'
+                break  # Use first image for now
+
+        # Create fresh interpreter instance with aux_img_dir
+        interpreter = PythonInterpreter("python", "Python code execution", {}, aux_img_dir=aux_img_dir)
+
+        # Extract PIL Images from inputs (for multi_modal_data)
         from PIL import Image
         images = []
         for msg in inputs:
             if msg['type'] == 'image':
-                # msg['value'] is the image path
                 img = Image.open(msg['value'])
+                image_size = [img.width, img.height]  # Store size as [width, height]
                 images.append(img)
 
         if images:
-            # Reset interpreter with PIL Images
+            # Create extra_info with image filename, path, and size
+            extra_info = {
+                'image_file_name': image_filename,
+                'image_file_path': image_path,
+                'image_size': image_size,
+            }
+
+            # Reset interpreter with PIL Images and extra_info
             multi_modal_data = {'image': images}
-            interpreter.reset(inputs, multi_modal_data, multi_modal_data)
+            interpreter.reset(inputs, multi_modal_data, multi_modal_data, extra_info=extra_info)
 
         return interpreter
 
@@ -463,6 +484,25 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
         if not self.use_tool:
             return super().generate_inner(inputs, **kwargs)
+
+        # Extract image filename and size to append to user prompt
+        image_filename = None
+        image_size = None
+        for msg in inputs:
+            if msg['type'] == 'image':
+                from PIL import Image
+                image_filename = os.path.basename(msg['value'])
+                img = Image.open(msg['value'])
+                image_size = (img.width, img.height)
+                break
+
+        # Append image filename and size info to the last text input (matches training format)
+        if image_filename and image_size:
+            filename_hint = f"\n\n### User Image Path:** \"{image_filename}\"\n### User Image Size:** {image_size[0]} (width) x {image_size[1]} (height)"
+            for msg in reversed(inputs):
+                if msg['type'] == 'text':
+                    msg['value'] += filename_hint
+                    break
 
         # Setup interpreter with input images
         interpreter = self.setup_interpreter_with_images(inputs)
@@ -526,7 +566,6 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                     obs, reward, done, info = interpreter.execute(response_message)
 
                     content_f = []
-                    content_f.append({"type": "text", "text": "<tool_response>"})
                     if isinstance(obs, dict):
                         images = obs.get('multi_modal_data', {}).get('image', [])
                         # Embed execution textual output (strip control tokens)
@@ -534,7 +573,6 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                         # Remove system specific tokens for readability
                         execution_text = execution_text.replace("\n<|im_start|>user\n", "").replace("<|im_end|>\n<|im_start|>assistant\n", "")
                         content_f.append({"type": "text", "text": execution_text})
-
                         # Add captured images
                         for im in images:
                             try:
@@ -546,7 +584,6 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                     elif isinstance(obs, str):
                         content_f.append({"type": "text", "text": obs})
 
-                    content_f.append({"type": "text", "text": "</tool_response>"})
                     input_msgs.append({"role": "user", "content": content_f})
                     # If interpreter signals completion after processing obs, return the response
                     if done:
