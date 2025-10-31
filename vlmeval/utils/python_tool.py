@@ -219,12 +219,14 @@ class PythonInterpreter(object):
         code = self._fix_image_paths_in_code(code)
 
         # execute code
-        success, output_text, captured_images = self.execute_code_safely(code)
+        success, output_text, captured_images, captured_image_paths = self.execute_code_safely(code)
         processed_images = []
-        for img in captured_images:
+        processed_image_paths = []
+        for idx, img in enumerate(captured_images):
             proc = self.maybe_resize_image(img)
             if proc is not None:
                 processed_images.append(proc)
+                processed_image_paths.append(captured_image_paths[idx])
             else:
                 print(
                     f"[PYTHON INTERPRETER DEBUG] Dropped malformed image with size: {img.size}"
@@ -232,6 +234,7 @@ class PythonInterpreter(object):
 
         if len(processed_images) > 5:
             processed_images = processed_images[:5]
+            processed_image_paths = processed_image_paths[:5]
             output_text += "Only keep first five images"
 
         self._log(
@@ -260,7 +263,10 @@ class PythonInterpreter(object):
                         + "</sandbox_output>"
                         + self.sandbox_prompt
                     ),
-                    "multi_modal_data": {"image": processed_images},
+                    "multi_modal_data": {
+                        "image": processed_images,
+                        "image_paths": processed_image_paths
+                    },
                 }
             else:
                 # Success without images – obs is a string
@@ -330,6 +336,7 @@ class PythonInterpreter(object):
 
             # Load captured images from Image.show() calls
             captured_images = []
+            captured_image_paths = []
             i = 0
             while True:
                 output_path = os.path.join(
@@ -337,22 +344,24 @@ class PythonInterpreter(object):
                 )
                 if os.path.exists(output_path) and i < 10:
                     captured_images.append(Image.open(output_path))
+                    captured_image_paths.append(output_path)
                     i += 1
                 else:
                     break
 
             # Additionally, load images that were explicitly saved by the model
-            saved_images = self._load_saved_images(output_text)
+            saved_images, saved_image_paths = self._load_saved_images(output_text)
 
             # Combine both types of images (Image.show() and saved files)
             all_images = captured_images + saved_images
+            all_image_paths = captured_image_paths + saved_image_paths
 
-            return success, output_text, all_images
+            return success, output_text, all_images, all_image_paths
 
         except subprocess.TimeoutExpired:
-            return False, "[EXECUTION_ERROR] Code execution timeout", []
+            return False, "[EXECUTION_ERROR] Code execution timeout", [], []
         except Exception as e:
-            return False, f"{str(e)}", []
+            return False, f"{str(e)}", [], []
 
 
     def create_safe_execution_environment(self, user_code: str) -> str:
@@ -543,10 +552,15 @@ finally:
 
         return unique_files
 
-    def _load_saved_images(self, output_text: str) -> List[Image.Image]:
-        """Load images that were explicitly saved by the model's code."""
+    def _load_saved_images(self, output_text: str) -> Tuple[List[Image.Image], List[str]]:
+        """Load images that were explicitly saved by the model's code.
+
+        Returns:
+            Tuple of (loaded_images, image_paths)
+        """
         saved_filenames = self._extract_saved_image_paths(output_text)
         loaded_images = []
+        image_paths = []
 
         for filename in saved_filenames:
             full_path = os.path.join(self.temp_dir, filename)
@@ -556,10 +570,11 @@ finally:
                     # Validate before adding
                     if self._validate_image_dims(img.width, img.height):
                         loaded_images.append(img.copy())
+                        image_paths.append(full_path)
                 except Exception as e:
                     self._log("WARNING_load_saved_image", f"Failed to load {filename}: {e}")
 
-        return loaded_images
+        return loaded_images, image_paths
 
     def _log(self, tag: str, payload: Any):
         """Append an entry to *execution_log.txt*.

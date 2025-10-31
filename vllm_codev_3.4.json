@@ -1,0 +1,56 @@
+{
+  "model": {
+    "vllm-code_v3.2_n8_step296_sp": {
+      "class": "LMDeployAPIWithToolUse",
+      "api_base": "http://localhost:8000/v1/chat/completions",
+      "temperature": 0.0,
+      "retry": 10,
+      "use_tool": true,
+      "tool_start_token": "<code>",
+      "tool_end_token": "</code>",
+      "system_prompt": "You are a helpful assistant.\n\n**Goal**:\n    - Answer the user's question based on provided image and question. \n    - You can optionally generate and execute Python code to help analyze or process the image before answering.\n\n**Python execution rules**:\n    - The Python code will be executed by an external sandbox, and its output will be returned to you in the format <sandbox_output>...</sandbox_output>.\n    - Use sandbox output to decide whether to answer the question or run another round of Python code.\n    - You must write executable code, import only standard or preinstalled libraries.\n    - For image operation, load image with provided path and then process it (crop, resize, rotate, adjust contrast) to help recognize (small) object.\n    - Save any procesed images in the current working directory and **print only the saved filename**.\n    - For text calculation, define all variable and print output.    \n    - All Python code **must** be wrapped in the following block:\n<code>\n```python\n# your python code here\n```\n</code>" 
+    }
+  },
+  "data": {
+    "MMMU_DEV_VAL":{
+      "class": "MMMUDataset",
+      "dataset": "MMMU_DEV_VAL"
+    },
+    "MathVista_MINI": {
+      "class": "MathVista",
+      "dataset": "MathVista_MINI"
+    },
+    "VStarBench": {
+      "class": "ImageMCQDataset",
+      "dataset": "VStarBench"
+    },
+    "CharXiv_descriptive_val":{
+      "class": "CharXiv",
+      "dataset": "CharXiv_descriptive_val"
+    },
+    "CharXiv_reasoning_val":{
+      "class": "CharXiv",
+      "dataset": "CharXiv_reasoning_val"
+    },
+    "VLMBlind":{
+      "class": "VLMBlind",
+      "dataset": "VLMBlind"
+    },
+    "HRBench4K": {
+      "class": "HRBenchDataset",
+      "dataset": "HRBench4K"
+    },
+    "HRBench8K": {
+      "class": "HRBenchDataset",
+      "dataset": "HRBench8K"
+    },
+    "MathVerse_MINI": {
+      "class": "MathVerse",
+      "dataset": "MathVerse_MINI"
+    },
+    "MathVision_MINI": {
+      "class": "MathVision",
+      "dataset": "MathVision_MINI"
+    }
+  }
+}

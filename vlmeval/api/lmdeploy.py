@@ -9,7 +9,9 @@ from ..utils.python_tool import extract_tool_call_contents
 import base64
 from io import BytesIO
 import threading
-from typing import List, Any
+from typing import List, Any, Optional
+from PIL import Image
+import re
 
 def encode_pil_image_to_base64(image):
     """Convert PIL Image to base64 string"""
@@ -402,13 +404,24 @@ class LMDeployAPI(LMDeployWrapper):
         return ret
     
     def redact_images(self, inputs, placeholder='<REDACTED_IMAGE>'):
-        """Redact images from inputs"""
+        """Replace image base64 data with file paths for logging
+
+        For sandbox-generated images, use the actual file path from _log_path metadata.
+        For original input images, use the placeholder (original image path).
+        """
         for msg in inputs:
             if "content" in msg and isinstance(msg['content'], list):
                 for c in msg['content']:
                     if 'image' in c['type']:
-                        # Redact image by removing the 'value' key
-                        c['image_url'] = placeholder
+                        # Check if this has _log_path metadata (sandbox-generated image)
+                        if '_log_path' in c and c['_log_path']:
+                            # Use the actual file path from sandbox
+                            c['image_url'] = c['_log_path']
+                            # Remove metadata
+                            del c['_log_path']
+                        else:
+                            # Original input image - use placeholder
+                            c['image_url'] = placeholder
             else:
                 pass
         return inputs
@@ -519,6 +532,9 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
         try_count = 0
         ret = (500, self.fail_msg, None)
 
+        # Track all sandbox image paths for logging
+        sandbox_image_paths = []
+
         try:
             while try_count < 10:  # Limit number of rounds
                 # Prepare payload with tool stop token
@@ -568,16 +584,27 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
                     content_f = []
                     if isinstance(obs, dict):
                         images = obs.get('multi_modal_data', {}).get('image', [])
+                        image_paths = obs.get('multi_modal_data', {}).get('image_paths', [])
+
+                        # Track image paths for logging
+                        sandbox_image_paths.extend(image_paths)
+
                         # Embed execution textual output (strip control tokens)
                         execution_text = obs['prompt']
                         # Remove system specific tokens for readability
                         execution_text = execution_text.replace("\n<|im_start|>user\n", "").replace("<|im_end|>\n<|im_start|>assistant\n", "")
                         content_f.append({"type": "text", "text": execution_text})
                         # Add captured images
-                        for im in images:
+                        for idx, im in enumerate(images):
                             try:
                                 im_b64 = encode_pil_image_to_base64(im)
-                                content_f.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{im_b64}"}})
+                                # Store the path as metadata (will be used for logging)
+                                img_path = image_paths[idx] if idx < len(image_paths) else None
+                                content_f.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{im_b64}"},
+                                    "_log_path": img_path  # Internal metadata for logging
+                                })
                             except Exception:
                                 pass
 
