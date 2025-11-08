@@ -511,7 +511,7 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
         # Append image filename and size info to the last text input (matches training format)
         if image_filename and image_size:
-            filename_hint = f"\n\n### User Image Path:** \"{image_filename}\"\n### User Image Size:** {image_size[0]} (width) x {image_size[1]} (height)"
+            filename_hint = f"\n\n### User Image Path:** \"{image_filename}\"\n### User Image Size:** \"{image_size[0]}x{image_size[1]}\"\n\n### **Output Format (strict adherence required):**\n\n<think>Your detailed reasoning process, including any <code> </code>, should go here.</think>\n<answer>Your final answer to the user's question goes here.</answer>"
             for msg in reversed(inputs):
                 if msg['type'] == 'text':
                     msg['value'] += filename_hint

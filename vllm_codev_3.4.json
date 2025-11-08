@@ -1,10 +1,12 @@
 {
   "model": {
-    "vllm-code_v3.2_n8_step296_sp": {
+    "vllm-codev3.4_7B_rub1_step230_sp": {
       "class": "LMDeployAPIWithToolUse",
       "api_base": "http://localhost:8000/v1/chat/completions",
+      "timeout": 600,
       "temperature": 0.0,
       "retry": 10,
+      "max_tokens": 4096,
       "use_tool": true,
       "tool_start_token": "<code>",
       "tool_end_token": "</code>",
@@ -47,6 +49,10 @@
     "MathVerse_MINI": {
       "class": "MathVerse",
       "dataset": "MathVerse_MINI"
+    },
+    "LogicVista":{
+      "class": "LogicVista",
+      "dataset": "LogicVista"
     },
     "MathVision_MINI": {
       "class": "MathVision",
