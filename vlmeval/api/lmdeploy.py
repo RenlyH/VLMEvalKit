@@ -12,6 +12,7 @@ import threading
 from typing import List, Any, Optional
 from PIL import Image
 import re
+import numpy as np
 
 def encode_pil_image_to_base64(image):
     """Convert PIL Image to base64 string"""
@@ -511,7 +512,17 @@ class LMDeployAPIWithToolUse(LMDeployAPI):
 
         # Append image filename and size info to the last text input (matches training format)
         if image_filename and image_size:
-            filename_hint = f"\n\n### User Image Path:** \"{image_filename}\"\n### User Image Size:** \"{image_size[0]}x{image_size[1]}\"\n\n### **Output Format (strict adherence required):**\n\n<think>Your detailed reasoning process, including any <code> </code>, should go here.</think>\n<answer>Your final answer to the user's question goes here.</answer>"
+            filename_hint = f"""
+
+### User Image Path:** \"{image_filename}\"
+### User Image Size:** \"{image_size[0]}x{image_size[1]}\"
+
+### **Output Format (strict adherence required):**
+
+
+<think>Your detailed reasoning process, including any code, should go here.</think>
+<answer>Your final answer to the user's question goes here.</answer> 
+"""
             for msg in reversed(inputs):
                 if msg['type'] == 'text':
                     msg['value'] += filename_hint
@@ -724,6 +735,12 @@ class LMDeployAPIWithCrop(LMDeployAPI):
         return super().generate(**kwargs)
 
     def generate_inner(self, inputs, **kwargs) -> str:
+        # Create unique crop temp directory for this sample (thread-safe)
+        import uuid
+        session_id = str(uuid.uuid4())[:8]
+        crop_temp_dir = f"/tmp/crop_{session_id}"
+        os.makedirs(crop_temp_dir, exist_ok=True)
+
         if "DeepEyes" in self.model:
             user_msg = "\nThink first, call **image_zoom_in_tool** if needed, then answer. Format strictly as:  <think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer> "
             for item in inputs[::-1]:
@@ -731,7 +748,8 @@ class LMDeployAPIWithCrop(LMDeployAPI):
                     item['value'] += user_msg
                     break
         elif "PixelReasoner" in self.model:
-            user_msg = "\n\nGuidelines: Understand the given visual information and the user query. Determine if it is beneficial to employ the given visual operations (tools). For a video, we can look closer by `select_frames`. For an image, we can look closer by `crop_image_normalized`. Reason with the visual information step by step, and put your final answer within \\boxed{}."
+            user_msg = "\n\nGuidelines: Understand the given visual information and the user query. Determine if it is beneficial to employ the given visual operations (tools). For an image, we can look closer by `crop_image_normalized`. Reason with the visual information step by step, and put your final answer within \\boxed{}."
+                        # user_msg = "\n\nGuidelines: Understand the given visual information and the user query. Determine if it is beneficial to employ the given visual operations (tools). For a video, we can look closer by `select_frames`. For an image, we can look closer by `crop_image_normalized`. Reason with the visual information step by step, and put your final answer within \\boxed{}."
             for item in inputs[::-1]:
                 if item['type'] == 'text':
                     item['value'] += user_msg
@@ -756,9 +774,11 @@ class LMDeployAPIWithCrop(LMDeployAPI):
 
         response_message = ""
         try_count = 0
+        crop_turn_idx = 0  # Track crop turn index for saving images
         ret = (500, self.fail_msg, None)
         try:
             while try_count < 5:  # Limit number of rounds
+                crop_turn_idx += 1
                 # Prepare payload with tool stop token
                 payload = dict(
                     model=self.model,
