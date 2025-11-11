@@ -47,6 +47,28 @@ def extract_model_name(filepath: str) -> str:
 
     return model_name
 
+
+def extract_dataset_name(filepath: str) -> str:
+    """
+    Extract dataset name from rollout file path.
+
+    Example: VStarBench_20251110062641.jsonl -> VStarBench
+    Example: HRBench8K_20251110160827.jsonl -> HRBench8K
+    """
+    path = Path(filepath)
+    filename = path.stem  # Get filename without extension
+    # Split by underscore and take everything before the timestamp
+    # Timestamp format: YYYYMMDDHHMMSS (14 digits)
+    parts = filename.split('_')
+    # Find where timestamp starts (look for part with all digits and length >= 8)
+    dataset_parts = []
+    for part in parts:
+        if part.isdigit() and len(part) >= 8:  # Timestamp detected
+            break
+        dataset_parts.append(part)
+
+    return '_'.join(dataset_parts) if dataset_parts else filename
+
 # Configuration
 OPENAI_API_KEY = ""
 GPT_MODEL = "gpt-4o"
@@ -310,6 +332,7 @@ class CropAccuracyJudge:
         # Encode image to base64
         try:
             if request.crop_image.startswith("http"):
+                assert False
                 # Use URL directly
                 image_data = request.crop_image
             else:
@@ -557,15 +580,16 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     Args:
         rollout_file: Path to rollout JSONL file
         result_xlsx: Path to result Excel file with answer accuracy
-        output_dir: Output directory (default: auto-generated from model name)
+        output_dir: Output directory (default: auto-generated from model and dataset name)
     """
-    # Extract model name and create output directory
+    # Extract model name, dataset name, and create output directory
     if output_dir is None:
         model_name = extract_model_name(rollout_file)
-        output_dir = f"crop_accuracy_{model_name}"
+        dataset_name = extract_dataset_name(rollout_file)
+        output_dir = f"crop_accuracy_{model_name}/{dataset_name}"
 
     output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     # Define output files
     results_file = output_path / "crop_accuracy_results.jsonl"

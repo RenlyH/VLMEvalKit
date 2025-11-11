@@ -6,6 +6,10 @@ For entries with NO actual tool operations, checks if the model:
 1. Hallucinates tool usage (claims to crop/zoom when it didn't)
 2. Faithfully analyzes without claiming tool use
 
+Tool usage detection:
+- Checks if entry has >3 messages (system, user, assistant+tool, tool return, assistant)
+- OR if there are >1 user messages (original + tool return)
+
 Usage:
     python analyze_hallucinated_tools.py <rollout_file> <result_xlsx> [output_dir]
 
@@ -27,7 +31,7 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 import pandas as pd
 
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)
 
 
 def extract_model_name(filepath: str) -> str:
@@ -36,6 +40,28 @@ def extract_model_name(filepath: str) -> str:
     dir_name = path.parent.name
     model_name = dir_name.replace('vllm-', '').replace('outputs/', '')
     return model_name
+
+
+def extract_dataset_name(filepath: str) -> str:
+    """
+    Extract dataset name from rollout file path.
+
+    Example: VStarBench_20251110062641.jsonl -> VStarBench
+    Example: HRBench8K_20251110160827.jsonl -> HRBench8K
+    """
+    path = Path(filepath)
+    filename = path.stem  # Get filename without extension
+    # Split by underscore and take everything before the timestamp
+    # Timestamp format: YYYYMMDDHHMMSS (14 digits)
+    parts = filename.split('_')
+    # Find where timestamp starts (look for part with all digits and length >= 14)
+    dataset_parts = []
+    for part in parts:
+        if part.isdigit() and len(part) >= 8:  # Timestamp detected
+            break
+        dataset_parts.append(part)
+
+    return '_'.join(dataset_parts) if dataset_parts else filename
 
 
 # Configuration
@@ -130,20 +156,41 @@ def extract_crops(entry: dict) -> List[str]:
     return crops
 
 
+def has_tool_usage(entry: dict) -> bool:
+    """
+    Check if entry has tool usage based on message structure.
+
+    Tool usage is indicated by:
+    1. More than 3 messages (system, user, assistant with tool, user with tool return, assistant)
+    2. More than 1 user message (original + tool return)
+
+    Returns:
+        True if tools were used, False otherwise
+    """
+    if len(entry) > 3:
+        return True
+
+    user_count = sum(1 for msg in entry if msg['role'] == 'user')
+    return user_count > 1
+
+
 def extract_thinking_content(entry: dict) -> str:
     """
-    Extract <think> content from assistant response.
+    Extract reasoning content from assistant response.
 
-    Returns the content within <think>...</think> tags.
+    First tries to extract <think>...</think> tags.
+    If not found, returns the full assistant content.
     """
     for msg in entry:
         if msg['role'] == 'assistant':
             content = msg.get('content', '')
             if isinstance(content, str):
-                # Extract content between <think> and </think>
+                # Try to extract content between <think> and </think>
                 match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
                 if match:
                     return match.group(1).strip()
+                # If no think tags, return full content
+                return content.strip()
     return ""
 
 
@@ -311,13 +358,14 @@ class HallucinationJudge:
 async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     """Main analysis function."""
 
-    # Extract model name and create output directory
+    # Extract model name, dataset name, and create output directory
     if output_dir is None:
         model_name = extract_model_name(rollout_file)
-        output_dir = f"hallucination_analysis_{model_name}"
+        dataset_name = extract_dataset_name(rollout_file)
+        output_dir = f"hallucination_analysis_{model_name}/{dataset_name}"
 
     output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     results_file = output_path / "hallucination_results.jsonl"
     summary_file = output_path / "hallucination_summary.json"
@@ -342,10 +390,10 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
 
     for idx, entry in enumerate(data):
         question, image_path = extract_question_and_image(entry)
-        crops = extract_crops(entry)
+        used_tools = has_tool_usage(entry)
         thinking = extract_thinking_content(entry)
 
-        if len(crops) == 0 and thinking:  # No crops but has thinking content
+        if not used_tools and thinking:  # No tools but has response content
             image_idx = extract_index_from_image_path(image_path)
             answer_info = answer_map.get(image_idx, {}) if image_idx is not None else {}
 
@@ -429,6 +477,10 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
         hallucinated_accuracy = (hallucinated_correct / hallucinated_total * 100) if hallucinated_total > 0 else 0
         faithful_accuracy = (faithful_correct / faithful_total * 100) if faithful_total > 0 else 0
     else:
+        hallucinated_correct = 0
+        hallucinated_total = 0
+        faithful_correct = 0
+        faithful_total = 0
         hallucinated_accuracy = 0
         faithful_accuracy = 0
 
@@ -439,7 +491,11 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
         "hallucinated_pct": hallucinated / total * 100 if total > 0 else 0,
         "faithful": faithful,
         "faithful_pct": faithful / total * 100 if total > 0 else 0,
+        "hallucinated_total": hallucinated_total,
+        "hallucinated_correct": hallucinated_correct,
         "hallucinated_accuracy": hallucinated_accuracy,
+        "faithful_total": faithful_total,
+        "faithful_correct": faithful_correct,
         "faithful_accuracy": faithful_accuracy
     }
 
@@ -454,15 +510,17 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     print()
     print("HALLUCINATION ANALYSIS:")
     print("-"*80)
-    print(f"Hallucinated Tool Usage: {hallucinated:>4} ({hallucinated/total*100:>5.1f}%)")
     print(f"Faithful Analysis:       {faithful:>4} ({faithful/total*100:>5.1f}%)")
+    print(f"Hallucinated Tool Usage: {hallucinated:>4} ({hallucinated/total*100:>5.1f}%)")
+
 
     if entries_with_answer:
         print()
         print("ANSWER ACCURACY:")
         print("-"*80)
-        print(f"Hallucinated entries:    {hallucinated_accuracy:>5.1f}% accuracy")
-        print(f"Faithful entries:        {faithful_accuracy:>5.1f}% accuracy")
+        print(f"Faithful entries:        {faithful_total:>4} ({faithful_accuracy:>5.1f}% correct, {faithful_correct} correct)")
+        print(f"Hallucinated entries:    {hallucinated_total:>4} ({hallucinated_accuracy:>5.1f}% correct, {hallucinated_correct} correct)")
+
 
     # Show examples
     if hallucinated > 0:
@@ -472,11 +530,28 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
 
         hallucinated_examples = [r for r in output_records if r['hallucinated_tools']][:3]
         for i, ex in enumerate(hallucinated_examples, 1):
-            print(f"\n{i}. Entry {ex['entry_idx']}:")
+            print(f"\n{i}. Entry {ex['entry_idx']} (Image {ex['image_index']}):")
             print(f"   Question: {ex['question'][:80]}...")
+            print(f"   Answer Correct: {ex.get('answer_correct', 'N/A')}")
             print(f"   Hallucination quotes:")
             for quote in ex['hallucination_quotes'][:2]:
                 print(f"     - \"{quote[:100]}...\"")
+    if faithful > 0:
+        print("\n" + "="*80)
+        print("EXAMPLES - FAITHFUL ANALYSIS (NO TOOL HALLUCINATION)")
+        print("="*80)
+
+        faithful_examples = [r for r in output_records if r['faithful']][:3]
+        for i, ex in enumerate(faithful_examples, 1):
+            print(f"\n{i}. Entry {ex['entry_idx']} (Image {ex['image_index']}):")
+            print(f"   Question: {ex['question'][:80]}...")
+            print(f"   Answer Correct: {ex.get('answer_correct', 'N/A')}")
+            print(f"   Judge Reasoning:")
+            reasoning = ex.get('judge_reasoning', '')
+            print(f"     {reasoning[:200]}..." if len(reasoning) > 200 else f"     {reasoning}")
+            print(f"   Response Preview:")
+            thinking = ex.get('thinking_content', '')
+            print(f"     {thinking[:200]}..." if len(thinking) > 200 else f"     {thinking}")
 
     print("\n" + "="*80)
     print(f"Results saved to: {output_dir}/")
