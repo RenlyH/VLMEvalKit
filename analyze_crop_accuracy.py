@@ -5,14 +5,30 @@ Crop Accuracy Analysis
 Analyzes whether cropped images contain the objects mentioned in the question.
 Uses GPT-4o Vision to judge each crop. Also loads answer accuracy from result Excel.
 
+Features:
+- Judges each crop for whether it contains relevant visual content
+- Analyzes correlation between crop accuracy and answer correctness
+- Automatically copies 30 sample images (originals + crops) for manual inspection
+
+Output Structure:
+- crop_accuracy_{model}/{dataset}/
+  - crop_accuracy_results.jsonl
+  - crop_accuracy_confusion_matrix.json
+  - {image_index}/          # Sample directories (30 samples)
+    - original.jpg           # Original image
+    - crops/                 # Folder with all crops
+      - crop_0.jpg
+      - crop_1.jpg
+      - ...
+    - metadata.json          # Question, judgments, accuracy
+
 Usage:
-    python analyze_crop_accuracy.py <rollout_file> <result_xlsx> [output_file]
+    python analyze_crop_accuracy.py <rollout_file> <result_xlsx> [output_dir]
 
 Example:
     python analyze_crop_accuracy.py \\
         outputs/response/vllm-pixelreasoner/VStarBench_20251110041538.jsonl \\
-        outputs/vllm-pixelreasoner/vllm-pixelreasoner_VStarBench_gpt-4o-mini_result.xlsx \\
-        crop_accuracy_results.jsonl
+        outputs/vllm-pixelreasoner/vllm-pixelreasoner_VStarBench_gpt-4o-mini_result.xlsx
 """
 
 import asyncio
@@ -21,6 +37,7 @@ import logging
 import sys
 import re
 import base64
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -179,12 +196,12 @@ def load_answer_accuracy(xlsx_file: str) -> Dict[int, Dict[str, Any]]:
     return result_map
 
 
-def extract_question_and_object(entry: dict) -> tuple[str, str, str]:
+def extract_question_and_image(entry: dict) -> tuple[str, str]:
     """
-    Extract question text, original image path, and target object from entry.
+    Extract question text and original image path from entry.
 
     Returns:
-        (question_text, image_path, target_object)
+        (question_text, image_path)
     """
     # Find user message with question
     for msg in entry:
@@ -206,14 +223,27 @@ def extract_question_and_object(entry: dict) -> tuple[str, str, str]:
                             question_text = match.group(1).strip()
 
             if question_text and image_path:
-                # Extract target object from question
-                # Common patterns: "color of the X", "position of the X", "What is X"
-                object_match = re.search(r'(?:the |of the |is the )([a-z\s]+?)(?:\?|\.| on | in )', question_text, re.IGNORECASE)
-                target_object = object_match.group(1).strip() if object_match else "object"
+                return question_text, image_path
 
-                return question_text, image_path, target_object
+    return "", ""
 
-    return "", "", "object"
+
+def has_tool_usage(entry: dict) -> bool:
+    """
+    Check if entry has tool usage based on message structure.
+
+    Tool usage is indicated by:
+    1. More than 3 messages (system, user, assistant with tool, user with tool return, assistant)
+    2. More than 1 user message (original + tool return)
+
+    Returns:
+        True if tools were used, False otherwise
+    """
+    if len(entry) > 3:
+        return True
+
+    user_count = sum(1 for msg in entry if msg['role'] == 'user')
+    return user_count > 1
 
 
 def extract_crops(entry: dict) -> List[str]:
@@ -250,13 +280,9 @@ def extract_crops(entry: dict) -> List[str]:
 # LLM Judge for Crop Accuracy
 # ============================================================================
 
-JUDGE_SYSTEM_PROMPT = """You are evaluating whether a cropped image contains a specific object.
+JUDGE_SYSTEM_PROMPT = """You are evaluating whether an image contains the relevant visual content to answer a question.
 
-You will be shown:
-1. The original question asking about a specific object
-2. A cropped image from the original image
-
-Your task: Determine if the cropped image contains at least one instance of the target object mentioned in the question.
+Your task: Determine if the image clearly shows the objects/content mentioned or implied in the question, and if those objects are the main focus of the image.
 
 Respond with JSON:
 {
@@ -265,19 +291,25 @@ Respond with JSON:
   "reasoning": "brief explanation"
 }
 
-Use 1 if the object is clearly visible in the crop, 0 if it's not visible or unclear."""
+Use 1 if:
+- The objects/content needed to answer the question are clearly visible
+- They are the main focus/subject of the image
+- The image provides clear, focused visual information relevant to answering the question
+
+Use 0 if:
+- The relevant objects are not visible, unclear, only partially captured, or very small
+- The objects are not the main subject of the image
+- The image does not provide clear visual information to answer the question"""
 
 
-def create_judge_prompt(question: str, target_object: str) -> str:
+def create_judge_prompt(question: str) -> str:
     """Create prompt for crop accuracy judge."""
     return f"""Question: {question}
 
-Target Object: {target_object}
+Does this image clearly show the objects/content needed to answer this question, and are they the main focus of the image?
 
-Does the cropped image contain at least one instance of "{target_object}"?
-
-Look carefully at the cropped image and determine if the target object is visible.
-Answer with 1 (yes, object is visible) or 0 (no, object is not visible or unclear)."""
+Evaluate if the image provides clear, focused visual information relevant to answering the question.
+Answer with 1 (yes, relevant content is clearly visible and main focus) or 0 (no, relevant content is not visible, unclear, partial, or not the main subject)."""
 
 
 # ============================================================================
@@ -288,8 +320,6 @@ Answer with 1 (yes, object is visible) or 0 (no, object is not visible or unclea
 class CropJudgeRequest:
     """Single crop judgment request"""
     question: str
-    target_object: str
-    original_image: str
     crop_image: str
     crop_index: int
     request_id: str
@@ -327,7 +357,7 @@ class CropAccuracyJudge:
 
     async def process_single(self, request: CropJudgeRequest) -> CropJudgeResponse:
         """Process a single crop judgment with retries"""
-        prompt = create_judge_prompt(request.question, request.target_object)
+        prompt = create_judge_prompt(request.question)
 
         # Encode image to base64
         try:
@@ -569,6 +599,84 @@ def print_confusion_matrix(stats: Dict[str, Any]):
             print(f"\nLift (Correct Crop → Correct Answer): {lift:.2f}x")
 
 
+def copy_sample_images(output_records: List[dict], output_dir: Path, num_samples: int = 30):
+    """
+    Copy sample original images and their crops to the output directory for inspection.
+
+    Args:
+        output_records: List of output records with crop information
+        output_dir: Base output directory
+        num_samples: Number of samples to copy (default: 30)
+    """
+    print(f"\nCopying {num_samples} sample images to output directory...")
+
+    # Filter to entries with crops
+    entries_with_crops = [r for r in output_records if r['num_crops'] > 0]
+
+    # Select samples (first N entries with crops)
+    samples = entries_with_crops[:num_samples]
+
+    copied_count = 0
+    for record in tqdm(samples, desc="Copying samples"):
+        image_idx = record['image_index']
+        if image_idx is None:
+            continue
+
+        # Create directory for this sample: {output_dir}/{image_index}/
+        sample_dir = output_dir / str(image_idx)
+        sample_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create crops subdirectory
+        crops_dir = sample_dir / "crops"
+        crops_dir.mkdir(exist_ok=True)
+
+        # Copy original image
+        original_path = Path(record['original_image'])
+        if original_path.exists():
+            # Keep original extension
+            dest_original = sample_dir / f"original{original_path.suffix}"
+            try:
+                shutil.copy2(original_path, dest_original)
+            except Exception as e:
+                logging.warning(f"Failed to copy original image {original_path}: {e}")
+                continue
+
+        # Copy crop images
+        for crop_idx, crop_path in enumerate(record['crop_paths']):
+            crop_path_obj = Path(crop_path)
+            if crop_path_obj.exists():
+                # Name crops as crop_0.jpg, crop_1.jpg, etc.
+                dest_crop = crops_dir / f"crop_{crop_idx}{crop_path_obj.suffix}"
+                try:
+                    shutil.copy2(crop_path_obj, dest_crop)
+                except Exception as e:
+                    logging.warning(f"Failed to copy crop {crop_path}: {e}")
+
+        # Save metadata for this sample
+        metadata = {
+            "image_index": image_idx,
+            "question": record["question"],
+            "num_crops": record["num_crops"],
+            "crop_judgments": record["crop_judgments"],
+            "any_crop_correct": record["any_crop_correct"],
+            "answer_correct": record.get("answer_correct"),
+            "prediction": record.get("prediction"),
+            "answer": record.get("answer"),
+            "crop_details": record["crop_details"]
+        }
+        metadata_file = sample_dir / "metadata.json"
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        copied_count += 1
+
+    print(f"  Copied {copied_count} samples to {output_dir}/")
+    print(f"  Each sample directory contains:")
+    print(f"    - original.jpg (or .png, etc.)")
+    print(f"    - crops/ (folder with crop_0.jpg, crop_1.jpg, etc.)")
+    print(f"    - metadata.json (question, judgments, accuracy)")
+
+
 # ============================================================================
 # Main Analysis
 # ============================================================================
@@ -619,8 +727,9 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     entry_metadata = []
 
     for idx, entry in enumerate(data):
-        question, image_path, target_object = extract_question_and_object(entry)
+        question, image_path = extract_question_and_image(entry)
         crops = extract_crops(entry)
+        used_tools = has_tool_usage(entry)
 
         # Extract index from image path for matching with answer accuracy
         image_idx = extract_index_from_image_path(image_path)
@@ -633,9 +742,9 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
             "image_index": image_idx,
             "question": question,
             "original_image": image_path,
-            "target_object": target_object,
             "num_crops": len(crops),
             "crop_paths": crops,
+            "has_tool_usage": used_tools,
             "prediction": answer_info.get('prediction'),
             "answer": answer_info.get('answer'),
             "answer_correct": answer_info.get('correct')
@@ -646,8 +755,6 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
         for crop_idx, crop_path in enumerate(crops):
             judge_requests.append(CropJudgeRequest(
                 question=question,
-                target_object=target_object,
-                original_image=image_path,
                 crop_image=crop_path,
                 crop_index=crop_idx,
                 request_id=f"entry_{idx}_crop_{crop_idx}",
@@ -704,12 +811,15 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
         # Extract judgment list
         judge_list = [j["contains_object"] for j in crop_judgments]
 
+        # Determine if entry is "faithful":
+        # - Has tool usage structure but no crops generated (tool attempted but failed)
+        is_faithful = meta["has_tool_usage"] and meta["num_crops"] == 0
+
         record = {
             "entry_idx": idx,
             "image_index": meta["image_index"],
             "question": meta["question"],
             "original_image": meta["original_image"],
-            "target_object": meta["target_object"],
             "num_crops": meta["num_crops"],
             "crop_paths": meta["crop_paths"],
             "crop_judgments": judge_list,
@@ -718,6 +828,8 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
             "max_crop_accuracy": max(judge_list) if judge_list else 0,
             "all_crops_correct": all(j == 1 for j in judge_list) if judge_list else False,
             "any_crop_correct": any(j == 1 for j in judge_list) if judge_list else False,
+            "faithful": is_faithful,
+            "has_tool_usage": meta["has_tool_usage"],
             "prediction": meta["prediction"],
             "answer": meta["answer"],
             "answer_correct": meta["answer_correct"]
@@ -748,10 +860,14 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     total_entries = len(output_records)
     entries_with_crops = sum(1 for r in output_records if r["num_crops"] > 0)
     total_crops = sum(r["num_crops"] for r in output_records)
+    faithful_entries = sum(1 for r in output_records if r["faithful"])
+    no_tool_entries = sum(1 for r in output_records if not r["has_tool_usage"])
 
-    print(f"Total Entries:       {total_entries}")
-    print(f"Entries with Crops:  {entries_with_crops}")
-    print(f"Total Crops:         {total_crops}")
+    print(f"Total Entries:            {total_entries}")
+    print(f"Entries with Crops:       {entries_with_crops}")
+    print(f"Faithful (tool but no crops): {faithful_entries}")
+    print(f"No Tool Attempt:          {no_tool_entries}")
+    print(f"Total Crops:              {total_crops}")
 
     if total_crops > 0:
         all_judgments = [j for r in output_records for j in r["crop_judgments"]]
@@ -762,6 +878,17 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
         print(f"  Overall:           {overall_crop_accuracy:.1f}% ({sum(all_judgments)}/{len(all_judgments)} contain object)")
         print(f"  All Crops Correct: {sum(1 for r in output_records if r['all_crops_correct'] and r['num_crops'] > 0)}/{entries_with_crops}")
         print(f"  Any Crop Correct:  {sum(1 for r in output_records if r['any_crop_correct'])}/{entries_with_crops}")
+
+    # Faithful entries stats
+    if faithful_entries > 0:
+        faithful_with_answer = [r for r in output_records if r["faithful"] and r["answer_correct"] is not None]
+        if faithful_with_answer:
+            faithful_correct = sum(1 for r in faithful_with_answer if r["answer_correct"])
+            faithful_accuracy = faithful_correct / len(faithful_with_answer) * 100
+            print()
+            print("FAITHFUL ENTRIES (Tool Attempted but No Crops):")
+            print(f"  Total:             {faithful_entries}")
+            print(f"  Answer Accuracy:   {faithful_accuracy:.1f}% ({faithful_correct}/{len(faithful_with_answer)} correct)")
 
     # Answer accuracy stats
     entries_with_answer = [r for r in output_records if r["answer_correct"] is not None]
@@ -774,10 +901,14 @@ async def main(rollout_file: str, result_xlsx: str, output_dir: str = None):
     # Print confusion matrix
     print_confusion_matrix(confusion_stats)
 
+    # Copy sample images for inspection
+    copy_sample_images(output_records, output_path, num_samples=30)
+
     print("\n" + "="*80)
     print(f"All results saved to: {output_dir}/")
     print(f"  - crop_accuracy_results.jsonl")
     print(f"  - crop_accuracy_confusion_matrix.json")
+    print(f"  - {sum(1 for r in output_records[:30] if r['num_crops'] > 0)} sample directories (with original and crops)")
     print("="*80)
 
     return output_records
