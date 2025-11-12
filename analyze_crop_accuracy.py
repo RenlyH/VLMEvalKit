@@ -280,9 +280,9 @@ def extract_crops(entry: dict) -> List[str]:
 # LLM Judge for Crop Accuracy
 # ============================================================================
 
-JUDGE_SYSTEM_PROMPT = """You are evaluating whether an image contains the relevant visual content to answer a question.
+JUDGE_SYSTEM_PROMPT = """You are evaluating whether an image contains any relevant visual content in the question.
 
-Your task: Determine if the image clearly shows the objects/content mentioned or implied in the question, and if those objects are the main focus of the image.
+Your task: Determine if the image clearly shows any objects/content mentioned or implied in the question.
 
 Respond with JSON:
 {
@@ -292,24 +292,29 @@ Respond with JSON:
 }
 
 Use 1 if:
-- The objects/content needed to answer the question are clearly visible
-- They are the main focus/subject of the image
-- The image provides clear, focused visual information relevant to answering the question
+- Any objects/content mentioned in the question is clearly visible
 
 Use 0 if:
-- The relevant objects are not visible, unclear, only partially captured, or very small
-- The objects are not the main subject of the image
-- The image does not provide clear visual information to answer the question"""
+- None of the relevant objects is visible, clearly visible, or identifiable"""
 
 
 def create_judge_prompt(question: str) -> str:
     """Create prompt for crop accuracy judge."""
     return f"""Question: {question}
 
-Does this image clearly show the objects/content needed to answer this question, and are they the main focus of the image?
+Does this image clearly show any objects/content mentioned in the question?
 
-Evaluate if the image provides clear, focused visual information relevant to answering the question.
-Answer with 1 (yes, relevant content is clearly visible and main focus) or 0 (no, relevant content is not visible, unclear, partial, or not the main subject)."""
+First you need to identify the relevant objects/content from the question, then check if ANY of them are clearly visible in the image.
+
+## Examples question:
+Is the soccer ball on the left or right side of the water dispenser?
+
+Then you should check if the soccer ball OR water dispenser is visible in the image. Any one of them counts.
+
+## Notes:
+The cropped image may be small and low resolution, but if it truly contains the relevant objects/content, you should count it as visible.
+
+Answer with 1 (yes, there is at least one relevant content is visible) or 0 (no, none of the relevant content is visible or clear)."""
 
 
 # ============================================================================
